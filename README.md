@@ -6,9 +6,15 @@ When you run several sessions at once, the important asks go missing in the scro
 
 It is a [Claude Code plugin](https://docs.claude.com/en/docs/claude-code) built on function hooks: a pane, a bar above the prompt, three tools for Claude, and a `/inbox` command.
 
-```
- Action Inbox  ·  5 open  ·  1 blocking  ·  2 from this session            [ Open inbox ]
-```
+<p align="center">
+  <img src="docs/pane.png" alt="The Action Inbox pane: open items grouped under three sessions, with a blocking manual step, a decision with option buttons, a PR to merge and a reply already delivered" width="420">
+</p>
+
+The bar above the prompt keeps the count in view in every session:
+
+![The Action Inbox bar above the prompt: 6 open, 2 blocking, with an Open inbox button](docs/band.png)
+
+<sub>Screenshots use a demo project with made-up items.</sub>
 
 ## What it does
 
