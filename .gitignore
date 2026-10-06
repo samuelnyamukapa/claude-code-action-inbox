@@ -1,0 +1,4 @@
+# laid by Claude Code when it loads the plugin; regenerated per build
+.claude-plugin/types/
+tsconfig.json
+node_modules/
