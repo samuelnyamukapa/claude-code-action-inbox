@@ -1,10 +1,14 @@
-# Action Inbox for Claude Code
+# Action Inbox for Claude Code and GitHub Copilot
 
-**One list of everything your Claude Code sessions are waiting on you for, across every session in a project.**
+**One list of everything your agent sessions are waiting on you for, across every session in a project — Claude Code and GitHub Copilot alike.**
 
 When you run several sessions at once, the important asks go missing in the scroll: "pick option A or B", "set this secret in the portal", "sign off this ADR", "review and merge PR #42". Action Inbox catches each one, files it under the session that raised it, and sends your answer back to that session.
 
-It is a [Claude Code plugin](https://docs.claude.com/en/docs/claude-code) built on function hooks: a pane, a bar above the prompt, three tools for Claude, and a `/inbox` command.
+It ships in two editions that share one inbox on your machine:
+- **Claude Code**: a [Claude Code plugin](https://docs.claude.com/en/docs/claude-code) built on function hooks: a pane, a bar above the prompt, three tools for Claude, and a `/inbox` command.
+- **GitHub Copilot** (Copilot CLI and VS Code): an [agent plugin](https://docs.github.com/en/copilot/concepts/agents/about-plugins) in [`copilot/`](copilot) with an MCP server, hooks, a skill, and a terminal command. See [GitHub Copilot](#github-copilot).
+
+An item a Copilot session raises shows up in the Claude Code pane, and a reply you type in either place goes back to the session that asked.
 
 <p align="center">
   <img src="docs/pane.png" alt="The Action Inbox pane: open items grouped under three sessions, with a blocking manual step, a decision with option buttons, a PR to merge and a reply already delivered" width="420">
@@ -61,7 +65,55 @@ The bar above the prompt keeps the count in view in every session:
    To try it in one session only, use `claude --plugin-dir ~/.claude/mods/action-inbox`.
 3. Start a new session and type `/inbox`.
 
+## GitHub Copilot
+
+The Copilot edition has no pane: Copilot plugins cannot draw UI. Instead you work the inbox through chat (`inbox list`, `inbox reply 3 go ahead`), from a terminal, or from the Claude Code pane if you also use Claude Code.
+
+### Install
+
+**Copilot CLI**
+```bash
+copilot plugin install samuelnyamukapa/claude-code-action-inbox:copilot
+```
+Or add the repository as a marketplace (`copilot plugin marketplace add samuelnyamukapa/claude-code-action-inbox`) and install `action-inbox` from it.
+
+**VS Code** (agent plugins, preview): clone the repository and point VS Code at the `copilot` folder in your settings:
+```json
+{
+  "chat.pluginLocations": { "/path/to/claude-code-action-inbox/copilot": true }
+}
+```
+Install it from the folder, not with *Install Plugin from Source* on the repository root: the root is the Claude Code edition.
+
+Both need **Node.js 18 or newer** on your PATH. The built files in `copilot/dist` are committed, so there is nothing to build.
+
+### What you get
+
+| Part | What it does |
+|---|---|
+| MCP server `action-inbox` | `inbox_add`, `inbox_resolve` and `inbox_list` (the same tools Claude gets), plus `inbox_command`, which runs your own `inbox …` commands when you type them in chat. Clients that show MCP prompts also get an `inbox` prompt. |
+| Hooks | Tell the server which session is calling, so items are filed under it. Log a *Review & merge PR #N* item on `gh pr create` and close it on `gh pr merge`. Show *Waiting on your answer* while Copilot's `ask_user` question is open. Deliver your replies. |
+| Skill `action-inbox` | The instructions: log what the user owes, act on `[Action Inbox]` replies, pass `inbox …` commands through. |
+| `dist/cli.mjs` | The inbox from a terminal: `node copilot/dist/cli.mjs list`, `… reply 3 go ahead`, `… pick 3 2`, `… done 3`, `… issue 3`, `… add <text>`. Use `--cwd <dir>` to pick the project. |
+
+### How replies reach a Copilot session
+
+Copilot has no way for a plugin to start a turn in an idle session, so a reply waits for the session's next step:
+- at its **next tool call**, as added context;
+- when it **finishes a turn**, by starting one more turn with your reply;
+- at the **start** of a resumed session.
+
+If the session is idle, send it any prompt (even "continue") and the reply arrives with it.
+
+### Differences from the Claude Code edition
+
+- No pane, no bar above the prompt, no toasts or push notifications.
+- *Open session* works only for Claude Code sessions in the desktop app.
+- Without hooks (for example, in a client that only loads the MCP server and skill), items are filed under a *Copilot session* group and replies are not delivered automatically; `inbox_list` still shows them.
+
 ## Commands
+
+In Claude Code:
 
 | Command | What it does |
 |---|---|
@@ -76,7 +128,7 @@ The bar above the prompt keeps the count in view in every session:
 
 ## How it works
 
-- **Storage.** Everything lives on your machine under `~/.claude/action-inbox/<project>/`. Each item and each event (a reply, a status change, a delivery) is its own small JSON file, written once and never edited. That way any number of sessions can write at the same moment without overwriting each other. Each session also keeps a heartbeat file, which is how the pane knows whether it is live.
+- **Storage.** Everything lives on your machine under `~/.claude/action-inbox/<project>/`, for both editions. Each item and each event (a reply, a status change, a delivery) is its own small JSON file, written once and never edited. That way any number of sessions can write at the same moment without overwriting each other. Each session also keeps a heartbeat file, which is how the pane knows whether it is live.
 - **Projects.** A project is keyed by its git `origin` remote, so every worktree of one repository shares one inbox. A project with no remote is keyed by its main worktree folder.
 - **Replies.** The owning session polls the folder every few seconds. It delivers each undelivered reply once with `prompt.submit` and records the delivery, so a reply is never sent twice.
 - **Resumed sessions.** A session resumed under a new id takes back the items it raised by finding its own `inbox_add` calls in its transcript.
@@ -90,7 +142,7 @@ Nothing leaves your machine unless you ask for it:
 
 ## Limitations
 
-- Only Claude Code sessions take part. Cowork and other Claude surfaces do not load Claude Code plugins.
+- Claude Code and GitHub Copilot (CLI and VS Code) sessions take part. Cowork and other Claude surfaces do not load plugins.
 - Closed items drop out of the pane after 24 hours, but their files stay on disk.
 - The colours are fixed: white text on burnt orange, rust and red, all at least 4.5:1 contrast. Native buttons follow the app's own theme.
 
@@ -102,6 +154,16 @@ claude plugin test .
 ```
 
 The hooks module is `hooks/register.tsx`. The pure logic is in `hooks/model.ts`, which holds the folding, numbering, command parsing and issue text, and is what the tests in `tests/` cover. Saving a file reloads the plugin in every session that loads this folder.
+
+The Copilot edition lives in `copilot/src` and reuses `hooks/model.ts`; `copilot/src/inbox.ts` is the same storage on plain Node. Rebuild `copilot/dist` after changing either, and commit the result:
+
+```bash
+npm install
+npm run build
+npm run test:copilot
+```
+
+Two environment variables help when trying it in a real agent: `ACTION_INBOX_HOME` points the Copilot edition at a throwaway inbox folder instead of `~/.claude/action-inbox`, and `ACTION_INBOX_DEBUG=<file>` makes every hook call append its payload and answer to that file. The hooks answer in the caller's own shape, so the same build also runs under Claude-compatible hook runners such as Codex and VS Code.
 
 ## Licence
 

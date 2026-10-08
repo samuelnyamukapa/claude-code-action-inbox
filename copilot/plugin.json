@@ -1,0 +1,11 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "action-inbox",
+  "version": "0.3.0",
+  "description": "A cross-session inbox of the decisions and manual actions you owe your agents, shared between GitHub Copilot and Claude Code sessions, with replies routed back to the session that asked.",
+  "author": { "name": "Samuel N", "url": "https://github.com/samuelnyamukapa" },
+  "homepage": "https://github.com/samuelnyamukapa/claude-code-action-inbox",
+  "repository": "https://github.com/samuelnyamukapa/claude-code-action-inbox",
+  "license": "MIT",
+  "keywords": ["inbox", "decisions", "actions", "sessions", "copilot"]
+}

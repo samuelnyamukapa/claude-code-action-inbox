@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [{ "type": "command", "bash": "node \"${PLUGIN_ROOT}/dist/hook.mjs\" sessionStart", "powershell": "node \"${PLUGIN_ROOT}/dist/hook.mjs\" sessionStart", "timeoutSec": 15 }],
+    "userPromptSubmitted": [{ "type": "command", "bash": "node \"${PLUGIN_ROOT}/dist/hook.mjs\" userPromptSubmitted", "powershell": "node \"${PLUGIN_ROOT}/dist/hook.mjs\" userPromptSubmitted", "timeoutSec": 10 }],
+    "preToolUse": [{ "type": "command", "bash": "node \"${PLUGIN_ROOT}/dist/hook.mjs\" preToolUse", "powershell": "node \"${PLUGIN_ROOT}/dist/hook.mjs\" preToolUse", "timeoutSec": 10, "matcher": "ask_user|.*inbox_(add|resolve|list|command)" }],
+    "postToolUse": [{ "type": "command", "bash": "node \"${PLUGIN_ROOT}/dist/hook.mjs\" postToolUse", "powershell": "node \"${PLUGIN_ROOT}/dist/hook.mjs\" postToolUse", "timeoutSec": 15 }],
+    "agentStop": [{ "type": "command", "bash": "node \"${PLUGIN_ROOT}/dist/hook.mjs\" agentStop", "powershell": "node \"${PLUGIN_ROOT}/dist/hook.mjs\" agentStop", "timeoutSec": 10 }],
+    "sessionEnd": [{ "type": "command", "bash": "node \"${PLUGIN_ROOT}/dist/hook.mjs\" sessionEnd", "powershell": "node \"${PLUGIN_ROOT}/dist/hook.mjs\" sessionEnd", "timeoutSec": 10 }]
+  }
+}
