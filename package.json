@@ -1,0 +1,16 @@
+{
+  "name": "action-inbox",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Builds the GitHub Copilot edition of Action Inbox (copilot/dist). The Claude Code plugin needs no build.",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild copilot/src/server.ts copilot/src/hook.ts copilot/src/cli.ts --bundle --platform=node --target=node18 --format=esm --out-extension:.js=.mjs --outdir=copilot/dist --legal-comments=none",
+    "test:copilot": "npm run build && node --test copilot/test/copilot.test.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.9.3"
+  }
+}

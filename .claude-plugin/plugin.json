@@ -1,6 +1,6 @@
 {
   "name": "action-inbox",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A cross-session inbox of the decisions and manual actions you owe, grouped by project and session, with replies routed back to the owning session.",
   "author": { "name": "Samuel N", "url": "https://github.com/samuelnyamukapa" },
   "homepage": "https://github.com/samuelnyamukapa/claude-code-action-inbox",

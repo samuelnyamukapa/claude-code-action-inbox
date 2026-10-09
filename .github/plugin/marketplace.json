@@ -1,0 +1,13 @@
+{
+  "name": "action-inbox",
+  "owner": { "name": "Samuel N", "url": "https://github.com/samuelnyamukapa" },
+  "metadata": { "description": "Action Inbox for GitHub Copilot (CLI and VS Code)." },
+  "plugins": [
+    {
+      "name": "action-inbox",
+      "source": "./copilot",
+      "description": "A cross-session inbox of the decisions and manual actions you owe your agents, shared with Claude Code.",
+      "version": "0.3.0"
+    }
+  ]
+}

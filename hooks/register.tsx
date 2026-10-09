@@ -356,7 +356,7 @@ export const register: Register = on => {
       key,
       name,
       dir: `${base}/${key}`,
-      info: { sessionId, branch, cwd: e.cwd, label: prior?.label, lastSeen: 0 },
+      info: { sessionId, branch, cwd: e.cwd, label: prior?.label, lastSeen: 0, client: 'claude' },
     }
     const c = ctx
     await $.fs.write(`${c.dir}/project.json`, JSON.stringify({ key, name, root }))
@@ -677,7 +677,7 @@ export const register: Register = on => {
 
     const act = (fn: () => Promise<unknown>) => () => void fn().then(() => scan($))
 
-    const renderItem = (item: ItemView, projectKeyOf: string, presence: string) => {
+    const renderItem = (item: ItemView, projectKeyOf: string, presence: string, isCopilot: boolean) => {
       const isOpen = item.status === 'open'
       const canReply = isOpen && item.kind !== 'waiting'
       const chip = CHIP[item.blocking ? 'blocking' : item.kind === 'waiting' ? 'waiting' : 'normal']
@@ -715,7 +715,14 @@ export const register: Register = on => {
           {item.feedback.map(fb => (
             <Text key={`fb:${fb.id}`} dimColor wrap="wrap">
               ↳ you {fb.isChoice ? 'chose' : 'replied'}: {fb.text} (
-              {fb.isDelivered ? 'delivered' : presence === 'live' ? 'sending…' : 'delivered when that session resumes'})
+              {fb.isDelivered
+                ? 'delivered'
+                : isCopilot
+                  ? 'delivered at its next step or prompt'
+                  : presence === 'live'
+                    ? 'sending…'
+                    : 'delivered when that session resumes'}
+              )
             </Text>
           ))}
           {!isOpen && (
@@ -848,6 +855,7 @@ export const register: Register = on => {
                     <Text bold color={WHITE}>
                       {group.branch ?? group.sessionId.slice(0, 8)}
                     </Text>
+                    {group.client === 'copilot' ? <Text color={PEACH}> (Copilot)</Text> : null}
                     {group.isSelf ? (
                       <Text bold color={PEACH}>
                         {' '}
@@ -861,7 +869,7 @@ export const register: Register = on => {
                     </Text>
                   </Text>
                 </Box>
-                {!group.isSelf && !isMobile && (
+                {!group.isSelf && !isMobile && group.client !== 'copilot' && (
                   <Box marginLeft={1} marginBottom={1}>
                     <Button
                       key={`open:${group.sessionId}`}
@@ -870,7 +878,7 @@ export const register: Register = on => {
                     />
                   </Box>
                 )}
-                {group.items.map(item => renderItem(item, project.key, group.presence))}
+                {group.items.map(item => renderItem(item, project.key, group.presence, group.client === 'copilot'))}
               </Box>
             ))}
           </Box>

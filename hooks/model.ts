@@ -162,6 +162,7 @@ export const buildSnapshot = (
           sessionId: view.owner,
           branch: info?.branch,
           label: info?.label,
+          client: info?.client,
           presence,
           isSelf: view.owner === self.sessionId,
           items: [],
