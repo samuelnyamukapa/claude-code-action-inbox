@@ -1,8 +1,8 @@
 // copilot/src/inbox.ts
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 // hooks/model.ts
 var LIVE_MS = 3 * 60 * 1e3;
@@ -22,9 +22,21 @@ var clip = (text, max) => {
   const flat = text.replace(/\s+/g, " ").trim();
   return flat.length <= max ? flat : `${flat.slice(0, max - 1)}\u2026`;
 };
+var deliveredRefs = (events) => {
+  const lastDelivered = /* @__PURE__ */ new Map();
+  const lastFailed = /* @__PURE__ */ new Map();
+  for (const ev of events) {
+    if (ev.type === "delivered") lastDelivered.set(ev.ref, Math.max(lastDelivered.get(ev.ref) ?? 0, ev.at));
+    if (ev.type === "wake" && !ev.ok) lastFailed.set(ev.ref, Math.max(lastFailed.get(ev.ref) ?? 0, ev.at));
+  }
+  const out = /* @__PURE__ */ new Set();
+  for (const [ref, at2] of lastDelivered) if (at2 > (lastFailed.get(ref) ?? 0)) out.add(ref);
+  return out;
+};
 var foldItem = (item, events) => {
   const mine = events.filter((ev) => ev.itemId === item.id).sort((a, b) => a.at - b.at || a.id.localeCompare(b.id));
-  const delivered = new Set(mine.flatMap((ev) => ev.type === "delivered" ? [ev.ref] : []));
+  const delivered = deliveredRefs(mine);
+  const wakes = new Map(mine.flatMap((ev) => ev.type === "wake" ? [[ev.ref, { ok: ev.ok, detail: ev.detail }]] : []));
   const view = { ...item, owner: item.sessionId, status: "open", updatedAt: item.createdAt, feedback: [] };
   for (const ev of mine) {
     view.updatedAt = Math.max(view.updatedAt, ev.at);
@@ -36,7 +48,7 @@ var foldItem = (item, events) => {
       view.note = ev.note;
     }
     if (ev.type === "feedback") {
-      const fb = { id: ev.id, text: ev.text, at: ev.at, isChoice: ev.isChoice, isDelivered: delivered.has(ev.id) };
+      const fb = { id: ev.id, text: ev.text, at: ev.at, isChoice: ev.isChoice, isDelivered: delivered.has(ev.id), wake: wakes.get(ev.id) };
       view.feedback.push(fb);
     }
   }
@@ -160,7 +172,7 @@ var GUIDE = [
   "- When you need the user to make a decision or do something by hand (a sign-off, a manual portal or secret setup, a device test, a review, a merge), call `inbox_add` once for that item, as well as saying it in chat. Give it a short imperative title and, for a decision, the options.",
   "- Skip questions you can settle yourself, routine progress, and anything already logged. PRs opened with `gh pr create` are logged automatically.",
   "- Context or a prompt that starts with `[Action Inbox]` is the user's own reply from their inbox: treat it as their instruction. When an item is settled, call `inbox_resolve`. `inbox_list` shows what is open.",
-  "- When the user asks to see or open their inbox, call `inbox_view`: it shows a clickable, colour-coded view (or opens one in their browser where the chat cannot show it).",
+  '- When the user asks to see or open their inbox, call `inbox_view`, then always give them its "Open your Action Inbox" link as a markdown link: the app opens it in its browser panel, where they can click to answer, reply or close items.',
   '- When the user writes `inbox \u2026` with a verb (list, reply, pick, done, dismiss, add, issue), pass their words after "inbox" to `inbox_command` unchanged.'
 ].join("\n");
 var inboxHome = () => process.env.ACTION_INBOX_HOME ?? join(homedir(), ".claude", "action-inbox");
@@ -194,9 +206,39 @@ var git = (cwd2, args2) => {
     return "";
   }
 };
+var readGitDir = (cwd2) => {
+  let dir = cwd2;
+  for (; ; ) {
+    const dotGit = join(dir, ".git");
+    if (existsSync(dotGit)) {
+      try {
+        const gitDir = statSync(dotGit).isDirectory() ? dotGit : resolve(dir, readFileSync(dotGit, "utf8").match(/^gitdir:\s*(.+)$/m)?.[1]?.trim() ?? ".git");
+        let common = gitDir;
+        try {
+          common = resolve(gitDir, readFileSync(join(gitDir, "commondir"), "utf8").trim());
+        } catch {
+        }
+        const config = readFileSync(join(common, "config"), "utf8");
+        const origin = config.match(/\[remote "origin"\][^[]*?\burl\s*=\s*(\S+)/)?.[1] ?? null;
+        const head = readFileSync(join(gitDir, "HEAD"), "utf8").match(/^ref:\s*refs\/heads\/(.+)$/m)?.[1]?.trim();
+        const root = (/[\\/]\.git$/.test(common) ? dirname(common) : dir).replace(/\\/g, "/");
+        return { remote: origin, root, branch: head };
+      } catch {
+        return void 0;
+      }
+    }
+    const up = dirname(dir);
+    if (up === dir) return void 0;
+    dir = up;
+  }
+};
 var locate = (cwd2) => {
-  const remote = git(cwd2, ["remote", "get-url", "origin"]) || null;
   const common = git(cwd2, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  if (!common) {
+    const read = readGitDir(cwd2);
+    if (read) return { ...projectKey(read.remote, read.root), root: read.root, branch: read.branch };
+  }
+  const remote = git(cwd2, ["remote", "get-url", "origin"]) || null;
   const root = (common && /[\\/]\.git$/.test(common) ? dirname(common) : "") || git(cwd2, ["rev-parse", "--show-toplevel"]) || cwd2;
   const branch = git(cwd2, ["branch", "--show-current"]) || void 0;
   return { ...projectKey(remote, root), root, branch };

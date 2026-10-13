@@ -131,6 +131,41 @@ const heartbeat = async ($: EngineInterface, c: Ctx, isEnded = false) => {
   await $.fs.write(`${c.dir}/sessions/${c.sessionId}.json`, JSON.stringify(c.info))
 }
 
+// ---------- the pane follows the project: open it in one session, it opens in all ----------
+
+type PaneState = { isOpen: boolean; at: number; by: string }
+// the latest project-wide pane state this session has applied
+let paneSeenAt = 0
+
+const paneTitle = (c: Ctx) => `Action Inbox · ${c.name}`
+
+/** Records the person opening or closing the pane, for every session of the project to follow. */
+const setPaneState = async ($: EngineInterface, c: Ctx, isOpen: boolean) => {
+  const at = await $.clock.now()
+  paneSeenAt = at
+  await $.fs.write(`${c.dir}/ui.json`, JSON.stringify({ isOpen, at, by: c.sessionId } satisfies PaneState))
+}
+
+const followPane = async ($: EngineInterface, c: Ctx) => {
+  let state: PaneState | undefined
+  try {
+    state = JSON.parse(await $.fs.read(`${c.dir}/ui.json`)) as PaneState
+  } catch {
+    return
+  }
+  if (!state || state.at <= paneSeenAt) return
+  paneSeenAt = state.at
+  const isUp = (await $.ui.panes()).some(pane => pane.id === PANE)
+  if (state.isOpen && !isUp) await $.ui.open({ id: PANE, title: paneTitle(c) })
+  if (!state.isOpen && isUp) await $.ui.close({ id: PANE })
+}
+
+/** The person asked for the pane: open it here and in the project's other sessions. */
+const openPane = async ($: EngineInterface, c: Ctx) => {
+  await setPaneState($, c, true)
+  return $.ui.open({ id: PANE, title: paneTitle(c) })
+}
+
 const addItem = async (
   $: EngineInterface,
   c: Ctx,
@@ -209,6 +244,7 @@ const scan = async ($: EngineInterface) => {
     if (!before || JSON.stringify({ ...before, updatedAt: 0 }) !== JSON.stringify({ ...snap, updatedAt: 0 })) {
       await update($, snapshot, () => snap)
     }
+    await followPane($, c).catch(() => undefined)
   } finally {
     isScanning = false
   }
@@ -445,6 +481,12 @@ export const register: Register = on => {
     return started
   })
 
+  // the person closing the pane closes it in the project's other sessions too
+  on('ui.close', async ($, e, next) => {
+    if (ctx && e.id === PANE && e.origin.kind === 'person') await setPaneState($, ctx, false).catch(() => undefined)
+    return next(e)
+  })
+
   on('session.end', async ($, e, next) => {
     const c = ctx
     if (c) {
@@ -599,7 +641,7 @@ export const register: Register = on => {
     if (cmd.verb === 'pane') {
       await update($, view, () => (cmd.isAll ? 'all' : 'project'))
       void scan($)
-      const opened = await $.ui.open({ id: PANE, title: `Action Inbox · ${c.name}` })
+      const opened = await openPane($, c)
       return { text: opened.isPlaced ? 'Action Inbox opened.' : 'Action Inbox is open; widen the window to see it.' }
     }
 
@@ -855,7 +897,9 @@ export const register: Register = on => {
                     <Text bold color={WHITE}>
                       {group.branch ?? group.sessionId.slice(0, 8)}
                     </Text>
-                    {group.client === 'copilot' ? <Text color={PEACH}> (Copilot)</Text> : null}
+                    {group.client === 'copilot' || group.client === 'codex' ? (
+                      <Text color={PEACH}> ({group.client === 'codex' ? 'Codex' : 'Copilot'})</Text>
+                    ) : null}
                     {group.isSelf ? (
                       <Text bold color={PEACH}>
                         {' '}
@@ -869,7 +913,7 @@ export const register: Register = on => {
                     </Text>
                   </Text>
                 </Box>
-                {!group.isSelf && !isMobile && group.client !== 'copilot' && (
+                {!group.isSelf && !isMobile && (group.client ?? 'claude') === 'claude' && (
                   <Box marginLeft={1} marginBottom={1}>
                     <Button
                       key={`open:${group.sessionId}`}
@@ -891,10 +935,24 @@ export const register: Register = on => {
     const snap: Snapshot | null = await read($, snapshot)
     const self = snap?.projects.find(p => p.isSelf)
     const open = self?.groups.flatMap(g => g.items.filter(i => i.status === 'open')) ?? []
-    if (e.props.hasSurvey || open.length === 0) return next(e)
+    if (e.props.hasSurvey || !snap) return next(e)
     const blocking = open.filter(i => i.blocking).length
     const mine = open.filter(i => i.owner === ctx?.sessionId).length
     const { Box, Text, Button } = $.ui.resolve(e)
+    const press = () => void (ctx ? openPane($, ctx) : undefined)
+    // with nothing waiting the band stays, quietly, so it is in the same place in every session
+    if (open.length === 0) {
+      return (
+        <Box width="100%" flexDirection="row" alignItems="center" gap={1}>
+          <Box flexGrow={1} paddingX={1}>
+            <Text dimColor wrap="truncate-end">
+              Action Inbox · nothing waiting on you
+            </Text>
+          </Box>
+          <Button key="open-inbox" label="Open inbox" dimColor onPress={press} />
+        </Box>
+      )
+    }
     const bar = blocking ? CHIP.blocking : CHIP.normal
     return (
       <Box width="100%" flexDirection="row" alignItems="center" gap={1}>
@@ -910,7 +968,7 @@ export const register: Register = on => {
           key="open-inbox"
           label="Open inbox"
           variant="primary"
-          onPress={() => void $.ui.open({ id: PANE, title: `Action Inbox · ${ctx?.name ?? ''}` })}
+          onPress={press}
         />
       </Box>
     )

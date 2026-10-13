@@ -33,9 +33,21 @@ var clip = (text, max) => {
   const flat = text.replace(/\s+/g, " ").trim();
   return flat.length <= max ? flat : `${flat.slice(0, max - 1)}\u2026`;
 };
+var deliveredRefs = (events) => {
+  const lastDelivered = /* @__PURE__ */ new Map();
+  const lastFailed = /* @__PURE__ */ new Map();
+  for (const ev of events) {
+    if (ev.type === "delivered") lastDelivered.set(ev.ref, Math.max(lastDelivered.get(ev.ref) ?? 0, ev.at));
+    if (ev.type === "wake" && !ev.ok) lastFailed.set(ev.ref, Math.max(lastFailed.get(ev.ref) ?? 0, ev.at));
+  }
+  const out = /* @__PURE__ */ new Set();
+  for (const [ref, at] of lastDelivered) if (at > (lastFailed.get(ref) ?? 0)) out.add(ref);
+  return out;
+};
 var foldItem = (item, events) => {
   const mine = events.filter((ev) => ev.itemId === item.id).sort((a, b) => a.at - b.at || a.id.localeCompare(b.id));
-  const delivered = new Set(mine.flatMap((ev) => ev.type === "delivered" ? [ev.ref] : []));
+  const delivered = deliveredRefs(mine);
+  const wakes = new Map(mine.flatMap((ev) => ev.type === "wake" ? [[ev.ref, { ok: ev.ok, detail: ev.detail }]] : []));
   const view = { ...item, owner: item.sessionId, status: "open", updatedAt: item.createdAt, feedback: [] };
   for (const ev of mine) {
     view.updatedAt = Math.max(view.updatedAt, ev.at);
@@ -47,14 +59,14 @@ var foldItem = (item, events) => {
       view.note = ev.note;
     }
     if (ev.type === "feedback") {
-      const fb = { id: ev.id, text: ev.text, at: ev.at, isChoice: ev.isChoice, isDelivered: delivered.has(ev.id) };
+      const fb = { id: ev.id, text: ev.text, at: ev.at, isChoice: ev.isChoice, isDelivered: delivered.has(ev.id), wake: wakes.get(ev.id) };
       view.feedback.push(fb);
     }
   }
   return view;
 };
 var pendingFor = (owner, items, events) => {
-  const delivered = new Set(events.flatMap((ev) => ev.type === "delivered" ? [ev.ref] : []));
+  const delivered = deliveredRefs(events);
   const replies = [];
   const notes = [];
   for (const item of items) {
@@ -88,16 +100,16 @@ var HELP = [
 
 // copilot/src/inbox.ts
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 var GUIDE = [
   "# Action Inbox",
   "The user runs several agent sessions at once and loses track of what they owe each one. This session has an Action Inbox, a list shared across all their sessions (Copilot and Claude Code).",
   "- When you need the user to make a decision or do something by hand (a sign-off, a manual portal or secret setup, a device test, a review, a merge), call `inbox_add` once for that item, as well as saying it in chat. Give it a short imperative title and, for a decision, the options.",
   "- Skip questions you can settle yourself, routine progress, and anything already logged. PRs opened with `gh pr create` are logged automatically.",
   "- Context or a prompt that starts with `[Action Inbox]` is the user's own reply from their inbox: treat it as their instruction. When an item is settled, call `inbox_resolve`. `inbox_list` shows what is open.",
-  "- When the user asks to see or open their inbox, call `inbox_view`: it shows a clickable, colour-coded view (or opens one in their browser where the chat cannot show it).",
+  '- When the user asks to see or open their inbox, call `inbox_view`, then always give them its "Open your Action Inbox" link as a markdown link: the app opens it in its browser panel, where they can click to answer, reply or close items.',
   '- When the user writes `inbox \u2026` with a verb (list, reply, pick, done, dismiss, add, issue), pass their words after "inbox" to `inbox_command` unchanged.'
 ].join("\n");
 var inboxHome = () => process.env.ACTION_INBOX_HOME ?? join(homedir(), ".claude", "action-inbox");
@@ -131,9 +143,39 @@ var git = (cwd, args) => {
     return "";
   }
 };
+var readGitDir = (cwd) => {
+  let dir = cwd;
+  for (; ; ) {
+    const dotGit = join(dir, ".git");
+    if (existsSync(dotGit)) {
+      try {
+        const gitDir = statSync(dotGit).isDirectory() ? dotGit : resolve(dir, readFileSync(dotGit, "utf8").match(/^gitdir:\s*(.+)$/m)?.[1]?.trim() ?? ".git");
+        let common = gitDir;
+        try {
+          common = resolve(gitDir, readFileSync(join(gitDir, "commondir"), "utf8").trim());
+        } catch {
+        }
+        const config = readFileSync(join(common, "config"), "utf8");
+        const origin = config.match(/\[remote "origin"\][^[]*?\burl\s*=\s*(\S+)/)?.[1] ?? null;
+        const head = readFileSync(join(gitDir, "HEAD"), "utf8").match(/^ref:\s*refs\/heads\/(.+)$/m)?.[1]?.trim();
+        const root = (/[\\/]\.git$/.test(common) ? dirname(common) : dir).replace(/\\/g, "/");
+        return { remote: origin, root, branch: head };
+      } catch {
+        return void 0;
+      }
+    }
+    const up = dirname(dir);
+    if (up === dir) return void 0;
+    dir = up;
+  }
+};
 var locate = (cwd) => {
-  const remote = git(cwd, ["remote", "get-url", "origin"]) || null;
   const common = git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  if (!common) {
+    const read = readGitDir(cwd);
+    if (read) return { ...projectKey(read.remote, read.root), root: read.root, branch: read.branch };
+  }
+  const remote = git(cwd, ["remote", "get-url", "origin"]) || null;
   const root = (common && /[\\/]\.git$/.test(common) ? dirname(common) : "") || git(cwd, ["rev-parse", "--show-toplevel"]) || cwd;
   const branch = git(cwd, ["branch", "--show-current"]) || void 0;
   return { ...projectKey(remote, root), root, branch };
@@ -235,7 +277,8 @@ var normalise = (raw2) => ({
   toolArgs: parseMaybe(raw2.toolArgs ?? raw2.tool_input),
   resultText: textOf(raw2.toolResult ?? raw2.tool_response),
   prompt: typeof (raw2.initialPrompt ?? raw2.prompt) === "string" ? String(raw2.initialPrompt ?? raw2.prompt) : void 0,
-  isClaudeShape: raw2.sessionId === void 0 && (raw2.session_id !== void 0 || raw2.hook_event_name !== void 0)
+  isClaudeShape: raw2.sessionId === void 0 && (raw2.session_id !== void 0 || raw2.hook_event_name !== void 0),
+  client: raw2.turn_id !== void 0 ? "codex" : "copilot"
 });
 var contextOut = (p, event2, lines) => {
   if (lines.length === 0) return void 0;
@@ -254,18 +297,17 @@ var handle = (event2, p) => {
     rememberWhere(p.sessionId, where2);
     saveProjectMeta(where2);
     const project2 = loadProject(where2);
-    heartbeat(project2, { sessionId: p.sessionId, branch: where2.branch, cwd: p.cwd, client: "copilot", label: p.prompt && clip(p.prompt, 60) });
+    heartbeat(project2, { sessionId: p.sessionId, branch: where2.branch, cwd: p.cwd, client: p.client, turn: "idle", label: p.prompt && clip(p.prompt, 60) });
     closeWaiting(project2, p.sessionId, "dismissed", "session restarted");
     const { replies, notes } = takePending(project2, p.sessionId);
     return contextOut(p, "SessionStart", [GUIDE, ...notes, ...replies]);
   }
   const where = recallWhere(p.sessionId, p.cwd);
   const project = loadProject(where);
-  const beat = (isEnded) => heartbeat(project, { sessionId: p.sessionId, branch: where.branch, cwd: p.cwd, client: "copilot", isEnded });
+  const beat = (state) => heartbeat(project, { sessionId: p.sessionId, branch: where.branch, cwd: p.cwd, client: p.client, ...state });
   if (event2 === "userPromptSubmitted") {
-    if (p.prompt && !p.prompt.startsWith("[Action Inbox]")) {
-      heartbeat(project, { sessionId: p.sessionId, branch: where.branch, cwd: p.cwd, client: "copilot", label: clip(p.prompt, 60) });
-    }
+    const isOwnPrompt = Boolean(p.prompt) && !p.prompt?.startsWith("[Action Inbox]");
+    beat({ turn: "running", label: isOwnPrompt ? clip(p.prompt ?? "", 60) : void 0 });
     if (!p.isClaudeShape) return void 0;
     const { replies, notes } = takePending(project, p.sessionId);
     return contextOut(p, "UserPromptSubmit", [...notes, ...replies]);
@@ -287,7 +329,7 @@ var handle = (event2, p) => {
     return void 0;
   }
   if (event2 === "postToolUse") {
-    beat();
+    beat({ turn: "running" });
     if (/inbox_add$/.test(p.toolName)) {
       const id = p.resultText.match(/\bib_[a-z0-9]+\b/)?.[0];
       const view = id ? viewOf(project, id) : void 0;
@@ -322,13 +364,13 @@ var handle = (event2, p) => {
     return contextOut(p, "PostToolUse", [...notes, ...replies]);
   }
   if (event2 === "agentStop") {
-    beat();
     const { replies, notes } = takePending(project, p.sessionId, { onlyIfReplies: true });
+    beat({ turn: replies.length ? "running" : "idle" });
     return replies.length ? { decision: "block", reason: [...notes, ...replies].join("\n\n") } : void 0;
   }
   if (event2 === "sessionEnd") {
     closeWaiting(project, p.sessionId, "dismissed", "session ended");
-    beat(true);
+    beat({ turn: "idle", isEnded: true });
   }
   return void 0;
 };

@@ -82,6 +82,8 @@
   // postMessage), or as a page in the browser (talking to the local inbox server).
   const isApp = window.parent !== window
   const api = window.__INBOX_API__
+  // the link names the project to show; the page keeps it as you click around
+  const linkedProject = new URLSearchParams(location.search).get('project') || undefined
   const root = document.getElementById('root')
   if (isApp) document.body.classList.add('app')
 
@@ -137,8 +139,8 @@
 
   // ---------- one way to ask the server, in either mode ----------
   const call = async (args) => {
-    const view = payload ? payload.view : { scope: 'project', showClosed: false }
-    const body = { scope: view.scope, showClosed: view.showClosed, ...args, session }
+    const view = payload ? payload.view : { scope: 'project', showClosed: false, projectKey: linkedProject }
+    const body = { scope: view.scope, showClosed: view.showClosed, projectKey: view.projectKey, ...args, session }
     if (isApp) {
       const result = await rpc('tools/call', { name: 'inbox_app_action', arguments: body })
       if (result && result.isError) throw new Error(textOf(result) || 'The inbox could not do that.')
@@ -211,14 +213,24 @@
     else window.open(url, '_blank', 'noopener')
   }
 
-  const renderItem = (item, project, presence, num) => {
+  const renderItem = (item, project, group, num) => {
+    const presence = group.presence
+    const client = group.client
+    const ended = presence === 'ended'
     const isOpen = item.status === 'open'
     const kindCls = !isOpen ? 'closed' : item.blocking ? 'blocking' : item.kind === 'waiting' ? 'waiting' : ''
     const canReply = isOpen && item.kind !== 'waiting'
     const repo = item.pr ? item.pr.repo : /^[\w.-]+\/[\w.-]+$/.test(project.name) ? project.name : null
     const canIssue = isOpen && item.kind !== 'waiting' && !item.issueUrl && repo
-    const base = { id: item.id, projectKey: project.key }
-    const delivered = fb => fb.isDelivered ? 'delivered' : presence === 'live' ? 'delivered at its next step' : 'delivered when that session resumes'
+    const base = { id: item.id, itemProjectKey: project.key }
+    const wakeMode = payload.wake || 'on'
+    const delivered = fb => {
+      if (fb.wake && fb.wake.ok) return 'woke that session with it'
+      if (fb.isDelivered) return 'delivered'
+      if (fb.wake && !fb.wake.ok) return `couldn't wake that session (${fb.wake.detail || 'error'}); it gets this with its next message`
+      if (client === 'copilot' && wakeMode !== 'off') return ended ? 'waking that session…' : 'wakes that session once it is closed, or reaches it at its next step or message'
+      return presence === 'live' ? 'delivered at its next step' : 'delivered when that session resumes'
+    }
 
     return h('article', { class: `item ${kindCls}` },
       h('div', { class: 'title' },
@@ -286,10 +298,10 @@
           h('div', { class: 'ghead' },
             h('span', { class: `dot${g.presence === 'live' ? ' live' : ''}`, 'aria-hidden': 'true' }, g.presence === 'live' ? '●' : '○'),
             h('span', { class: 'who' }, g.branch || g.sessionId.slice(0, 8)),
-            g.client === 'copilot' ? h('span', { class: 'tag' }, 'Copilot') : g.client === 'claude' ? h('span', { class: 'tag' }, 'Claude') : null,
+            g.client ? h('span', { class: 'tag' }, { copilot: 'Copilot', claude: 'Claude', codex: 'Codex' }[g.client] || g.client) : null,
             g.isSelf ? h('span', { class: 'tag' }, 'this session') : null,
             h('span', { class: 'meta' }, `· ${g.presence} · ${g.items.filter(i => i.status === 'open').length} open${g.label ? ` · “${g.label}”` : ''}`)),
-          g.items.map(i => renderItem(i, project, g.presence, project.isSelf ? numbers.get(i.id) : undefined)))))),
+          g.items.map(i => renderItem(i, project, g, project.isSelf ? numbers.get(i.id) : undefined)))))),
       note ? h('div', { class: 'toast', role: 'status' }, note) : null,
     ].flat(Infinity).filter(Boolean))
     reportSize()
@@ -305,7 +317,7 @@
   }
 
   if (isApp) {
-    rpc('ui/initialize', { protocolVersion: '2026-01-26', appCapabilities: { availableDisplayModes: ['inline'] }, clientInfo: { name: 'action-inbox', version: '0.4.0' } })
+    rpc('ui/initialize', { protocolVersion: '2026-01-26', appCapabilities: { availableDisplayModes: ['inline'] }, clientInfo: { name: 'action-inbox', version: '0.5.0' } })
       .then(result => {
         applyHost(result && result.hostContext)
         canOpenLinks = Boolean(result && result.hostCapabilities && result.hostCapabilities.openLinks)
