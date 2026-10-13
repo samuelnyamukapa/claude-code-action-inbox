@@ -163,7 +163,8 @@ const handle = (event: string, p: Payload): unknown => {
         }
       }
     }
-    // the user's answers reach a working session at its next step
+    // the user's answers reach a working session at its next step this hook sees:
+    // Copilot runs it only after shell, ask_user and inbox tools (see hooks.json)
     const { replies, notes } = takePending(project, p.sessionId)
     return contextOut(p, 'PostToolUse', [...notes, ...replies])
   }

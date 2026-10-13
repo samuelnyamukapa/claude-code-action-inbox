@@ -28,7 +28,7 @@ import {
 import INBOX_HTML from './ui/inbox.html'
 import { openBrowser, startWeb } from './web'
 
-const VERSION = '0.4.0'
+const VERSION = '0.4.1'
 const UI_URI = 'ui://action-inbox/inbox.html'
 const UI_MIME = 'text/html;profile=mcp-app'
 const PROTOCOLS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05']

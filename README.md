@@ -103,7 +103,7 @@ Both need **Node.js 18 or newer** on your PATH. The built files in `copilot/dist
 ### How replies reach a Copilot session
 
 Copilot has no way for a plugin to start a turn in an idle session, so a reply waits for the session's next step:
-- at its **next tool call**, as added context;
+- at its **next shell command or inbox tool call**, as added context (the hook skips other tools, such as file edits, so it doesn't slow every step down);
 - when it **finishes a turn**, by starting one more turn with your reply;
 - at the **start** of a resumed session.
 
