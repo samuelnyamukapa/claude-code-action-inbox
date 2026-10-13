@@ -20,7 +20,7 @@ import {
   viewOf,
 } from './inbox'
 
-const INBOX_TOOL = /inbox_(add|resolve|list|command)$/
+const INBOX_TOOL = /inbox_(add|resolve|list|command|view|app_action)$/
 const SHELL_TOOL = /^(bash|powershell|shell|run_in_terminal|runInTerminal)$/i
 const ASK_TOOL = /^(ask_user|AskUserQuestion)$/i
 const WAITING = 'Waiting on your answer: '

@@ -67,7 +67,11 @@ The bar above the prompt keeps the count in view in every session:
 
 ## GitHub Copilot
 
-The Copilot edition has no pane: Copilot plugins cannot draw UI. Instead you work the inbox through chat (`inbox list`, `inbox reply 3 go ahead`), from a terminal, or from the Claude Code pane if you also use Claude Code.
+Ask Copilot to **show your inbox**. You get the same colour-coded inbox as the Claude Code pane, with buttons to pick a decision's option, reply, mark done, dismiss, reopen or promote to an issue:
+- **In the chat**, as an interactive card, where the app supports [MCP Apps](https://modelcontextprotocol.io/extensions/apps/overview) (VS Code's Copilot Chat does).
+- **In your browser** otherwise. The inbox server opens a private page on `127.0.0.1` behind a random link, and the chat shows the link. It works while that Copilot session runs.
+
+You can also type `inbox list`, `inbox reply 3 go ahead` and so on in the chat, use the terminal command, or use the Claude Code pane if you also run Claude Code.
 
 ### Install
 
@@ -91,7 +95,7 @@ Both need **Node.js 18 or newer** on your PATH. The built files in `copilot/dist
 
 | Part | What it does |
 |---|---|
-| MCP server `action-inbox` | `inbox_add`, `inbox_resolve` and `inbox_list` (the same tools Claude gets), plus `inbox_command`, which runs your own `inbox …` commands when you type them in chat. Clients that show MCP prompts also get an `inbox` prompt. |
+| MCP server `action-inbox` | `inbox_add`, `inbox_resolve` and `inbox_list` (the same tools Claude gets); `inbox_view`, the clickable inbox; and `inbox_command`, which runs your own `inbox …` commands when you type them in chat. Clients that show MCP prompts also get an `inbox` prompt. |
 | Hooks | Tell the server which session is calling, so items are filed under it. Log a *Review & merge PR #N* item on `gh pr create` and close it on `gh pr merge`. Show *Waiting on your answer* while Copilot's `ask_user` question is open. Deliver your replies. |
 | Skill `action-inbox` | The instructions: log what the user owes, act on `[Action Inbox]` replies, pass `inbox …` commands through. |
 | `dist/cli.mjs` | The inbox from a terminal: `node copilot/dist/cli.mjs list`, `… reply 3 go ahead`, `… pick 3 2`, `… done 3`, `… issue 3`, `… add <text>`. Use `--cwd <dir>` to pick the project. |
@@ -107,7 +111,7 @@ If the session is idle, send it any prompt (even "continue") and the reply arriv
 
 ### Differences from the Claude Code edition
 
-- No pane, no bar above the prompt, no toasts or push notifications.
+- The inbox is a card in the chat or a browser page, not a docked pane, and there is no bar above the prompt, no toasts and no push notifications.
 - *Open session* works only for Claude Code sessions in the desktop app.
 - Without hooks (for example, in a client that only loads the MCP server and skill), items are filed under a *Copilot session* group and replies are not delivered automatically; `inbox_list` still shows them.
 

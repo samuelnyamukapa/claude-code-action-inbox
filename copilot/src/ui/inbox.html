@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Action Inbox</title>
+<style>
+  /* Signal colours are fixed and always carry white text at 4.5:1 or better,
+     so they read the same in light and dark themes, as in the Claude Code pane. */
+  :root {
+    color-scheme: light dark;
+    --orange: #C4510F;
+    --red: #C62828;
+    --amber: #B45309;
+    --rust: #7A2E0E;
+    --peach: #FCE3D3;
+    --live: #4ADE80;
+    --bg: var(--color-background-primary, light-dark(#ffffff, #1e1e1e));
+    --bg-2: var(--color-background-secondary, light-dark(#f6f6f6, #252526));
+    --fg: var(--color-text-primary, light-dark(#1f1f1f, #e8e8e8));
+    --fg-2: var(--color-text-secondary, light-dark(#5c5c5c, #a8a8a8));
+    --line: var(--color-border-secondary, light-dark(#d9d9d9, #3c3c3c));
+    --radius: var(--border-radius-md, 8px);
+    --font: var(--font-sans, system-ui, -apple-system, "Segoe UI", sans-serif);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 var(--font); }
+  body.app { background: transparent; }
+  main { max-width: 760px; margin: 0 auto; padding: 12px 16px 16px; }
+  body.app main { padding: 4px 2px 8px; }
+  .bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 12px; border-radius: var(--radius); background: var(--orange); color: #fff; font-weight: 600; }
+  .bar.blocking { background: var(--red); }
+  .bar .count { flex: 1; min-width: 140px; }
+  .tools { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0; }
+  button { font: inherit; font-size: 13px; padding: 5px 11px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg-2); color: var(--fg); cursor: pointer; min-height: 30px; }
+  button:hover { border-color: var(--fg-2); }
+  button:focus-visible, textarea:focus-visible { outline: 2px solid var(--orange); outline-offset: 2px; }
+  button.primary { background: var(--orange); border-color: var(--orange); color: #fff; font-weight: 600; }
+  button.primary:hover { background: #A9450C; }
+  button.quiet { color: var(--fg-2); }
+  button.on-bar { background: rgba(255,255,255,.18); border-color: rgba(255,255,255,.45); color: #fff; }
+  button:disabled { opacity: .55; cursor: default; }
+  h2 { font-size: 15px; margin: 18px 0 8px; }
+  .group { margin-bottom: 14px; }
+  .ghead { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; padding: 5px 10px; border-radius: 6px; background: var(--rust); color: #fff; margin-bottom: 8px; }
+  .ghead .who { font-weight: 700; }
+  .ghead .meta { color: var(--peach); }
+  .dot { color: var(--peach); }
+  .dot.live { color: var(--live); }
+  .tag { font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 4px; background: rgba(255,255,255,.2); color: #fff; }
+  .item { border: 1px solid var(--line); border-left: 5px solid var(--orange); border-radius: var(--radius); padding: 9px 11px; margin: 0 0 8px; background: var(--bg); }
+  .item.blocking { border-left-color: var(--red); }
+  .item.waiting { border-left-color: var(--amber); }
+  .item.closed { border-left-color: var(--line); opacity: .7; }
+  .title { font-weight: 600; overflow-wrap: anywhere; }
+  .item.closed .title { text-decoration: line-through; font-weight: 400; }
+  .chip { display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: .02em; padding: 1px 6px; border-radius: 4px; color: #fff; background: var(--orange); margin-right: 6px; vertical-align: 1px; }
+  .chip.blocking { background: var(--red); }
+  .chip.waiting { background: var(--amber); }
+  .chip.closed { background: #6b6b6b; }
+  .flag { color: var(--red); font-weight: 700; margin-right: 4px; }
+  .num, .age, .detail, .fb, .status, .hint { color: var(--fg-2); }
+  .detail { margin-top: 3px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .link { display: inline-block; margin-top: 3px; color: var(--orange); overflow-wrap: anywhere; cursor: pointer; text-decoration: underline; background: none; border: 0; padding: 0; min-height: 0; font-size: 13px; }
+  .fb { margin-top: 3px; font-size: 13px; }
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .reply { margin-top: 8px; display: flex; gap: 6px; align-items: flex-end; }
+  textarea { flex: 1; min-height: 56px; resize: vertical; font: inherit; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
+  .confirm { margin-top: 8px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .toast { position: sticky; bottom: 8px; margin-top: 10px; padding: 7px 11px; border-radius: 6px; background: var(--fg); color: var(--bg); font-size: 13px; }
+  .empty { color: var(--fg-2); padding: 14px 2px; }
+  .err { color: var(--red); }
+  @media (max-width: 480px) { main { padding: 8px 12px; } .reply { flex-direction: column; align-items: stretch; } }
+</style>
+</head>
+<body>
+<main id="root"><p class="empty">Loading the inbox…</p></main>
+<script>
+(() => {
+  'use strict'
+  // Runs two ways: as an MCP App inside the chat (talking to the host over
+  // postMessage), or as a page in the browser (talking to the local inbox server).
+  const isApp = window.parent !== window
+  const api = window.__INBOX_API__
+  const root = document.getElementById('root')
+  if (isApp) document.body.classList.add('app')
+
+  const KIND = { decision: 'DECIDE', action: 'DO', signoff: 'SIGN OFF', review: 'REVIEW', merge: 'MERGE', waiting: 'WAITING' }
+  let payload = null
+  let session = undefined
+  let replyTo = null
+  let confirmIssue = null
+  let busy = false
+  let note = ''
+  let canOpenLinks = false
+  let noteTimer = 0
+  const say = text => {
+    note = text
+    clearTimeout(noteTimer)
+    noteTimer = setTimeout(() => { note = ''; render() }, 4000)
+  }
+
+  // ---------- talking to the host (MCP App) ----------
+  let nextId = 1
+  const pending = new Map()
+  const rpc = (method, params) => new Promise((resolve, reject) => {
+    const id = nextId++
+    pending.set(id, { resolve, reject })
+    window.parent.postMessage({ jsonrpc: '2.0', id, method, params }, '*')
+  })
+  const notify = (method, params) => window.parent.postMessage({ jsonrpc: '2.0', method, params }, '*')
+
+  const applyHost = ctx => {
+    if (!ctx) return
+    if (ctx.theme) document.documentElement.style.colorScheme = ctx.theme
+    const vars = ctx.styles && ctx.styles.variables
+    if (vars) for (const [k, v] of Object.entries(vars)) if (v) document.documentElement.style.setProperty(k, v)
+  }
+
+  if (isApp) {
+    window.addEventListener('message', e => {
+      if (e.source !== window.parent) return
+      const m = e.data
+      if (!m || m.jsonrpc !== '2.0') return
+      if (m.method === undefined && pending.has(m.id)) {
+        const p = pending.get(m.id)
+        pending.delete(m.id)
+        m.error ? p.reject(new Error(m.error.message || 'Host error')) : p.resolve(m.result)
+        return
+      }
+      if (m.method === 'ui/notifications/tool-input') session = (m.params && m.params.arguments && m.params.arguments.session) || session
+      if (m.method === 'ui/notifications/tool-result') take(m.params && m.params.structuredContent)
+      if (m.method === 'ui/notifications/host-context-changed') applyHost(m.params)
+      if (m.method === 'ui/resource-teardown' && m.id !== undefined) window.parent.postMessage({ jsonrpc: '2.0', id: m.id, result: {} }, '*')
+    })
+  }
+
+  // ---------- one way to ask the server, in either mode ----------
+  const call = async (args) => {
+    const view = payload ? payload.view : { scope: 'project', showClosed: false }
+    const body = { scope: view.scope, showClosed: view.showClosed, ...args, session }
+    if (isApp) {
+      const result = await rpc('tools/call', { name: 'inbox_app_action', arguments: body })
+      if (result && result.isError) throw new Error(textOf(result) || 'The inbox could not do that.')
+      return result && result.structuredContent
+    }
+    const res = await fetch(`${api}/act`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    if (!res.ok) throw new Error(await res.text())
+    return res.json()
+  }
+  const textOf = r => ((r && r.content) || []).map(c => c.text || '').join(' ')
+
+  const act = async (args) => {
+    if (busy) return
+    busy = true
+    render()
+    try {
+      take(await call(args))
+    } catch (err) {
+      say(String(err.message || err))
+    } finally {
+      busy = false
+      render()
+    }
+  }
+
+  const take = next => {
+    if (!next || !next.snapshot) return
+    payload = next
+    if (next.message) say(next.message)
+    render()
+  }
+
+  // the host sizes the frame to fit; report after every draw, not only on resize,
+  // because a hidden or off-screen frame gets no resize callbacks
+  let lastSize = ''
+  const reportSize = () => {
+    if (!isApp) return
+    const size = { width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight }
+    const key = `${size.width}x${size.height}`
+    if (key === lastSize) return
+    lastSize = key
+    notify('ui/notifications/size-changed', size)
+  }
+
+  // ---------- drawing ----------
+  const h = (tag, attrs, ...kids) => {
+    const el = document.createElement(tag)
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (v === undefined || v === null || v === false) continue
+      if (k.startsWith('on')) el.addEventListener(k.slice(2), v)
+      else if (k === 'class') el.className = v
+      else el.setAttribute(k, v === true ? '' : v)
+    }
+    for (const kid of kids.flat(Infinity)) if (kid !== null && kid !== undefined && kid !== false) el.append(kid.nodeType ? kid : String(kid))
+    return el
+  }
+  const btn = (label, onclick, cls) => h('button', { type: 'button', class: cls, onclick, disabled: busy || undefined }, label)
+
+  const age = (now, at) => {
+    const s = Math.max(0, Math.round((now - at) / 1000))
+    if (s < 60) return 'now'
+    if (s < 3600) return `${Math.floor(s / 60)}m`
+    if (s < 86400) return `${Math.floor(s / 3600)}h`
+    return `${Math.floor(s / 86400)}d`
+  }
+
+  const openLink = url => {
+    if (!/^https:\/\//.test(url)) return
+    if (isApp) rpc('ui/open-link', { url }).catch(() => { say('The host would not open that link.'); render() })
+    else window.open(url, '_blank', 'noopener')
+  }
+
+  const renderItem = (item, project, presence, num) => {
+    const isOpen = item.status === 'open'
+    const kindCls = !isOpen ? 'closed' : item.blocking ? 'blocking' : item.kind === 'waiting' ? 'waiting' : ''
+    const canReply = isOpen && item.kind !== 'waiting'
+    const repo = item.pr ? item.pr.repo : /^[\w.-]+\/[\w.-]+$/.test(project.name) ? project.name : null
+    const canIssue = isOpen && item.kind !== 'waiting' && !item.issueUrl && repo
+    const base = { id: item.id, projectKey: project.key }
+    const delivered = fb => fb.isDelivered ? 'delivered' : presence === 'live' ? 'delivered at its next step' : 'delivered when that session resumes'
+
+    return h('article', { class: `item ${kindCls}` },
+      h('div', { class: 'title' },
+        h('span', { class: `chip ${kindCls}` }, KIND[item.kind] || item.kind.toUpperCase()),
+        item.blocking && isOpen ? h('span', { class: 'flag' }, 'BLOCKING') : null,
+        num ? h('span', { class: 'num' }, `#${num} `) : null,
+        item.title,
+        h('span', { class: 'age' }, ` · ${age(payload.snapshot.updatedAt, item.createdAt)}`)),
+      item.detail ? h('div', { class: 'detail' }, item.detail) : null,
+      item.link ? h('button', { type: 'button', class: 'link', onclick: () => openLink(item.link) }, item.link) : null,
+      item.issueUrl ? h('button', { type: 'button', class: 'link', onclick: () => openLink(item.issueUrl) }, `Issue: ${item.issueUrl}`) : null,
+      item.feedback.map(fb => h('div', { class: 'fb' }, `↳ you ${fb.isChoice ? 'chose' : 'replied'}: ${fb.text} (${delivered(fb)})`)),
+      !isOpen ? h('div', { class: 'status' }, `${item.status} by ${item.closedBy || 'someone'}${item.note ? `: ${item.note}` : ''}`) : null,
+      item.kind === 'waiting' && isOpen ? h('div', { class: 'hint' }, 'Answer it in that session.') : null,
+      h('div', { class: 'actions' },
+        isOpen && item.kind === 'decision' ? (item.options || []).map(o => btn(o, () => act({ ...base, action: 'pick', text: o }), 'primary')) : null,
+        canReply ? btn(replyTo === item.id ? 'Cancel reply' : 'Reply', () => { replyTo = replyTo === item.id ? null : item.id; render() }) : null,
+        isOpen ? btn('Done', () => act({ ...base, action: 'done' })) : null,
+        isOpen ? btn('Dismiss', () => act({ ...base, action: 'dismiss' }), 'quiet') : null,
+        !isOpen ? btn('Reopen', () => act({ ...base, action: 'reopen' }), 'quiet') : null,
+        canIssue && confirmIssue !== item.id ? btn('Promote to issue', () => { confirmIssue = item.id; render() }, 'quiet') : null),
+      canIssue && confirmIssue === item.id ? h('div', { class: 'confirm' },
+        h('span', {}, `Create a GitHub issue in ${repo}?`),
+        btn('Create issue', () => { confirmIssue = null; act({ ...base, action: 'issue' }) }, 'primary'),
+        btn('Cancel', () => { confirmIssue = null; render() }, 'quiet')) : null,
+      replyTo === item.id ? replyBox(base) : null)
+  }
+
+  const replyBox = base => {
+    const area = h('textarea', { placeholder: 'Your reply goes to the session that raised this', 'aria-label': 'Reply' })
+    const send = () => {
+      const text = area.value.trim()
+      if (!text) return
+      replyTo = null
+      act({ ...base, action: 'reply', text })
+    }
+    area.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) send() })
+    setTimeout(() => area.focus(), 0)
+    return h('div', { class: 'reply' }, area, btn('Send', send, 'primary'))
+  }
+
+  const render = () => {
+    if (!payload) return
+    const { snapshot, view, webUrl } = payload
+    const self = snapshot.projects.find(p => p.isSelf)
+    const numbers = new Map()
+    let n = 0
+    for (const g of (self && self.groups) || []) for (const i of g.items) if (i.status === 'open') numbers.set(i.id, ++n)
+    const projects = snapshot.projects.filter(p => view.scope === 'all' || p.isSelf)
+    const isEmpty = projects.every(p => p.groups.length === 0)
+    const blocking = snapshot.blockingCount > 0
+
+    root.replaceChildren(...[
+      h('div', { class: `bar${blocking ? ' blocking' : ''}`, role: 'status' },
+        h('span', { class: 'count' }, `Action Inbox · ${snapshot.openCount} open${blocking ? ` · ${snapshot.blockingCount} blocking` : ''}${view.scope === 'all' ? ' · all projects' : ` · ${view.projectName}`}`),
+        isApp && webUrl && canOpenLinks ? btn('Open in browser', () => rpc('ui/open-link', { url: webUrl }).catch(() => {}), 'on-bar') : null),
+      h('div', { class: 'tools' },
+        btn(view.scope === 'all' ? 'This project' : 'All projects', () => act({ action: 'refresh', scope: view.scope === 'all' ? 'project' : 'all' })),
+        btn(view.showClosed ? 'Hide closed' : 'Show closed', () => act({ action: 'refresh', showClosed: !view.showClosed })),
+        btn('Refresh', () => act({ action: 'refresh' }), 'quiet')),
+      isEmpty ? h('p', { class: 'empty' }, 'Nothing waiting on you. Items appear here when a session needs a decision, a manual step or a merge.') : null,
+      projects.map(project => h('section', {},
+        view.scope === 'all' ? h('h2', {}, project.name) : null,
+        project.groups.map(g => h('div', { class: 'group' },
+          h('div', { class: 'ghead' },
+            h('span', { class: `dot${g.presence === 'live' ? ' live' : ''}`, 'aria-hidden': 'true' }, g.presence === 'live' ? '●' : '○'),
+            h('span', { class: 'who' }, g.branch || g.sessionId.slice(0, 8)),
+            g.client === 'copilot' ? h('span', { class: 'tag' }, 'Copilot') : g.client === 'claude' ? h('span', { class: 'tag' }, 'Claude') : null,
+            g.isSelf ? h('span', { class: 'tag' }, 'this session') : null,
+            h('span', { class: 'meta' }, `· ${g.presence} · ${g.items.filter(i => i.status === 'open').length} open${g.label ? ` · “${g.label}”` : ''}`)),
+          g.items.map(i => renderItem(i, project, g.presence, project.isSelf ? numbers.get(i.id) : undefined)))))),
+      note ? h('div', { class: 'toast', role: 'status' }, note) : null,
+    ].flat(Infinity).filter(Boolean))
+    reportSize()
+  }
+
+  // ---------- start ----------
+  const load = () => call({ action: 'refresh' }).then(take).catch(err => { if (!payload) root.replaceChildren(h('p', { class: 'err' }, `Could not load the inbox: ${err.message || err}`)) })
+  // background tabs skip the polling, never the first load
+  // and never while the user is typing a reply or confirming, which a redraw would wipe
+  const refresh = () => {
+    if (busy || replyTo !== null || confirmIssue !== null) return
+    if (document.visibilityState === 'visible' || !payload) load()
+  }
+
+  if (isApp) {
+    rpc('ui/initialize', { protocolVersion: '2026-01-26', appCapabilities: { availableDisplayModes: ['inline'] }, clientInfo: { name: 'action-inbox', version: '0.4.0' } })
+      .then(result => {
+        applyHost(result && result.hostContext)
+        canOpenLinks = Boolean(result && result.hostCapabilities && result.hostCapabilities.openLinks)
+        notify('ui/notifications/initialized', {})
+        new ResizeObserver(reportSize).observe(document.body)
+        reportSize()
+      })
+      .catch(() => { root.replaceChildren(h('p', { class: 'err' }, 'This host could not start the inbox view.')) })
+  } else {
+    refresh()
+  }
+  // other sessions add and answer items all the time
+  setInterval(refresh, isApp ? 10000 : 4000)
+})()
+</script>
+</body>
+</html>

@@ -19,13 +19,17 @@ The user runs several agent sessions at once (GitHub Copilot and Claude Code) an
 - When an item is settled, call `inbox_resolve` with its id and `done` or `dismissed`, and a short note of what was decided.
 - `inbox_list` shows what is still open.
 
+## When the user wants to see their inbox
+
+Call `inbox_view`. It shows the inbox as a clickable, colour-coded view in the chat where the app supports it (MCP Apps), with buttons for each decision's options, Reply, Done, Dismiss and Promote to issue. Where the chat can only show text, it opens the same view in the user's browser and gives them the link. Pass `open_in_browser: true` if they ask for it in the browser or say they cannot see it.
+
 ## When the user types "inbox …"
 
 Pass their words after "inbox" to `inbox_command` unchanged and show them the result. The verbs are:
 
 | Command | What it does |
 |---|---|
-| `inbox` or `inbox list` | Numbered list of open items |
+| `inbox list` | Numbered list of open items, as text |
 | `inbox reply <n> <text>` | Reply to item n; it goes to the session that raised it |
 | `inbox pick <n> <option>` | Choose an option of decision n, by number or label |
 | `inbox done <n> [note]` / `inbox dismiss <n>` | Close item n |
