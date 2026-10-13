@@ -2,9 +2,9 @@
 // GitHub Copilot MCP server, its hooks and the terminal CLI. It reads and
 // writes the same files as hooks/register.tsx, so every client shares one inbox.
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 import type { Actor, InboxEvent, Item, ItemKind, ItemStatus, ItemView, ProjectView, SessionInfo, Snapshot } from '../../types'
 import {
@@ -33,7 +33,7 @@ export const GUIDE = [
   '- When you need the user to make a decision or do something by hand (a sign-off, a manual portal or secret setup, a device test, a review, a merge), call `inbox_add` once for that item, as well as saying it in chat. Give it a short imperative title and, for a decision, the options.',
   '- Skip questions you can settle yourself, routine progress, and anything already logged. PRs opened with `gh pr create` are logged automatically.',
   "- Context or a prompt that starts with `[Action Inbox]` is the user's own reply from their inbox: treat it as their instruction. When an item is settled, call `inbox_resolve`. `inbox_list` shows what is open.",
-  '- When the user asks to see or open their inbox, call `inbox_view`: it shows a clickable, colour-coded view (or opens one in their browser where the chat cannot show it).',
+  '- When the user asks to see or open their inbox, call `inbox_view`, then always give them its "Open your Action Inbox" link as a markdown link: the app opens it in its browser panel, where they can click to answer, reply or close items.',
   '- When the user writes `inbox …` with a verb (list, reply, pick, done, dismiss, add, issue), pass their words after "inbox" to `inbox_command` unchanged.',
 ].join('\n')
 
@@ -80,10 +80,49 @@ const git = (cwd: string, args: string[]): string => {
   }
 }
 
+/**
+ * The same facts read straight from .git, for processes started without git on
+ * their PATH (a Windows process gets the default PATH, which often lacks it).
+ */
+const readGitDir = (cwd: string): { remote: string | null; root: string; branch?: string } | undefined => {
+  let dir = cwd
+  for (;;) {
+    const dotGit = join(dir, '.git')
+    if (existsSync(dotGit)) {
+      try {
+        // a worktree's .git is a file naming its git dir, whose commondir names the main one
+        const gitDir = statSync(dotGit).isDirectory()
+          ? dotGit
+          : resolve(dir, readFileSync(dotGit, 'utf8').match(/^gitdir:\s*(.+)$/m)?.[1]?.trim() ?? '.git')
+        let common = gitDir
+        try {
+          common = resolve(gitDir, readFileSync(join(gitDir, 'commondir'), 'utf8').trim())
+        } catch {
+          // not a worktree: its git dir is the common one
+        }
+        const config = readFileSync(join(common, 'config'), 'utf8')
+        const origin = config.match(/\[remote "origin"\][^[]*?\burl\s*=\s*(\S+)/)?.[1] ?? null
+        const head = readFileSync(join(gitDir, 'HEAD'), 'utf8').match(/^ref:\s*refs\/heads\/(.+)$/m)?.[1]?.trim()
+        const root = (/[\\/]\.git$/.test(common) ? dirname(common) : dir).replace(/\\/g, '/')
+        return { remote: origin, root, branch: head }
+      } catch {
+        return undefined
+      }
+    }
+    const up = dirname(dir)
+    if (up === dir) return undefined
+    dir = up
+  }
+}
+
 /** The project a folder belongs to, keyed exactly as the Claude Code plugin keys it. */
 export const locate = (cwd: string): Where => {
-  const remote = git(cwd, ['remote', 'get-url', 'origin']) || null
   const common = git(cwd, ['rev-parse', '--path-format=absolute', '--git-common-dir'])
+  if (!common) {
+    const read = readGitDir(cwd)
+    if (read) return { ...projectKey(read.remote, read.root), root: read.root, branch: read.branch }
+  }
+  const remote = git(cwd, ['remote', 'get-url', 'origin']) || null
   const root = (common && /[\\/]\.git$/.test(common) ? dirname(common) : '') || git(cwd, ['rev-parse', '--show-toplevel']) || cwd
   const branch = git(cwd, ['branch', '--show-current']) || undefined
   return { ...projectKey(remote, root), root, branch }

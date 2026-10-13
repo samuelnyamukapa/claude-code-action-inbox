@@ -1,7 +1,7 @@
 // End-to-end checks of the built Copilot edition: the MCP server, the hooks and
 // the CLI, run as child processes against a throwaway inbox and git repository.
 import { execFileSync, spawn } from 'node:child_process'
-import { mkdtempSync, readdirSync, readFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { after, before, describe, test } from 'node:test'
@@ -11,7 +11,20 @@ import { fileURLToPath } from 'node:url'
 const DIST = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist')
 const scratch = mkdtempSync(join(tmpdir(), 'action-inbox-test-'))
 const repo = join(scratch, 'repo')
-const env = { ...process.env, ACTION_INBOX_HOME: join(scratch, 'inbox'), PLUGIN_DATA: join(scratch, 'data'), ACTION_INBOX_NO_BROWSER: '1' }
+const HERE = dirname(fileURLToPath(import.meta.url))
+const FAKE_LOG = join(scratch, 'fake-copilot.log')
+const env = {
+  ...process.env,
+  ACTION_INBOX_HOME: join(scratch, 'inbox'),
+  PLUGIN_DATA: join(scratch, 'data'),
+  ACTION_INBOX_NO_BROWSER: '1',
+  // the background process wakes sessions through this stand-in, quickly
+  ACTION_INBOX_COPILOT_CMD: JSON.stringify([process.execPath, join(HERE, 'fake-copilot.mjs')]),
+  ACTION_INBOX_WAKE_MS: '200',
+  FAKE_COPILOT_LOG: FAKE_LOG,
+  // where Copilot keeps its sessions; the waker reads their in-use locks here
+  COPILOT_HOME: join(scratch, 'copilot-home'),
+}
 const KEY = 'acme-widgets'
 const SESSION = 'copilot-session-1'
 
@@ -31,7 +44,9 @@ const cli = (...args) => execFileSync('node', [join(DIST, 'cli.mjs'), '--cwd', r
 
 const files = sub => {
   const dir = join(env.ACTION_INBOX_HOME, KEY, sub)
-  return readdirSync(dir).map(name => JSON.parse(readFileSync(join(dir, name), 'utf8')))
+  return readdirSync(dir)
+    .filter(name => name.endsWith('.json'))
+    .map(name => JSON.parse(readFileSync(join(dir, name), 'utf8')))
 }
 
 // a minimal MCP client over stdio
@@ -75,10 +90,34 @@ before(async () => {
   call = text.call
 })
 
-after(() => {
+after(async () => {
   text.kill()
   apps.kill()
+  // stop the background process the servers started
+  try {
+    const state = JSON.parse(readFileSync(join(env.ACTION_INBOX_HOME, '.daemon.json'), 'utf8'))
+    await fetch(`http://127.0.0.1:${state.port}/${state.token}/shutdown`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+  } catch {
+    // never started
+  }
 })
+
+const until = async (check, ms = 6000) => {
+  const end = Date.now() + ms
+  while (Date.now() < end) {
+    const value = check()
+    if (value) return value
+    await new Promise(r => setTimeout(r, 100))
+  }
+  return check()
+}
+const fakeRuns = () => {
+  try {
+    return readFileSync(FAKE_LOG, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l))
+  } catch {
+    return []
+  }
+}
 
 describe('Copilot edition', () => {
   test('lists the same tools as the Claude Code plugin, plus inbox_command and inbox_view', async () => {
@@ -272,6 +311,114 @@ describe('Copilot edition', () => {
       })
     })
     assert.equal(rebound, 403)
+  })
+
+  test('a session another process holds open is left alone; once released it is woken', async () => {
+    const held = 'copilot-held-1'
+    const stateDir = join(env.COPILOT_HOME, 'session-state', held)
+    mkdirSync(stateDir, { recursive: true })
+    // this test process stands in for the app holding the session
+    const hold = join(stateDir, `inuse.${process.pid}.hold`)
+    writeFileSync(hold, '')
+    const hookAs = (event, payload) =>
+      execFileSync('node', [join(DIST, 'hook.mjs'), event], { env, input: JSON.stringify({ sessionId: held, cwd: repo, ...payload }) })
+    hookAs('sessionStart', {})
+    await call('inbox_add', { kind: 'action', title: 'Restart the worker', session: { id: held, cwd: repo } })
+    hookAs('agentStop', { stopReason: 'end_turn' })
+    const n = cli('list').match(/#(\d+) \[action\] Restart the worker/)[1]
+    cli('reply', n, 'go ahead')
+    await new Promise(r => setTimeout(r, 1200))
+    assert.equal(fakeRuns().filter(r => r.args.includes(held)).length, 0, 'held open: not woken')
+    rmSync(hold)
+    const run = await until(() => fakeRuns().find(r => r.args.includes(held)))
+    assert.ok(run, 'released: woken, though it never ended')
+    assert.match(run.stdin, /Their reply: go ahead/)
+  })
+
+  test('Codex sessions are labelled Codex and never woken through copilot', async () => {
+    const codex = 'codex-thread-1'
+    const run = (event, payload) =>
+      execFileSync('node', [join(DIST, 'hook.mjs'), event], {
+        env,
+        input: JSON.stringify({ session_id: codex, turn_id: 't1', cwd: repo, hook_event_name: 'X', ...payload }),
+      })
+    run('sessionStart', {})
+    run('sessionEnd', {})
+    assert.equal(files('sessions').find(s => s.sessionId === codex).client, 'codex')
+    await call('inbox_add', { kind: 'action', title: 'Check the Codex label', session: { id: codex, cwd: repo } })
+    const n = cli('list').match(/#(\d+) \[action\] Check the Codex label/)[1]
+    cli('reply', n, 'ok')
+    await new Promise(r => setTimeout(r, 1200))
+    assert.equal(fakeRuns().filter(r => r.args.includes(codex)).length, 0)
+    // Codex's own hook file runs the same script on Codex's event names
+    const codexHooks = JSON.parse(readFileSync(join(DIST, '..', 'hooks', 'hooks.json'), 'utf8')).hooks
+    assert.deepEqual(Object.keys(codexHooks), ['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Stop', 'SessionEnd'])
+    assert.ok(new RegExp(`^(?:${codexHooks.PostToolUse[0].matcher})$`).test('mcp__action_inbox__inbox_add'))
+  })
+
+  test('the project is found from .git alone when git is not on the PATH', () => {
+    const noGit = { ...env, PATH: dirname(process.execPath), Path: dirname(process.execPath) }
+    const out = execFileSync(process.execPath, [join(DIST, 'cli.mjs'), '--cwd', join(repo), 'list'], { env: noGit, encoding: 'utf8' })
+    assert.match(out, /^Action Inbox · acme\/widgets/)
+  })
+
+  test('the inbox link is stable: every server gives the same address', async () => {
+    const one = (await call('inbox_view', { session: { id: SESSION, cwd: repo } })).structuredContent.webUrl
+    const two = (await apps.call('inbox_view', { session: { id: SESSION, cwd: repo } })).structuredContent.webUrl
+    assert.equal(one, two)
+    assert.match(one, /\?project=acme-widgets$/)
+    const text = (await call('inbox_view', { session: { id: SESSION, cwd: repo } })).content[0].text
+    assert.ok(text.startsWith(`[Open your Action Inbox](${one})`))
+  })
+
+  test('a reply to an ended Copilot session wakes it with the reply as its prompt', async () => {
+    const ended = 'copilot-ended-1'
+    const hookAs = (event, payload) =>
+      execFileSync('node', [join(DIST, 'hook.mjs'), event], { env, input: JSON.stringify({ sessionId: ended, cwd: repo, ...payload }) })
+    hookAs('sessionStart', { initialPrompt: 'Tune the cache' })
+    await call('inbox_add', { kind: 'decision', title: 'Pick a cache size', options: ['64 MB', '256 MB'], session: { id: ended, cwd: repo } })
+    hookAs('sessionEnd', { reason: 'user_exit' })
+    const n = cli('list').match(/#(\d+) \[decision\] Pick a cache size/)[1]
+    cli('pick', n, '2')
+    const run = await until(() => fakeRuns().find(r => r.args.includes(ended)))
+    assert.ok(run, 'the background process should have started copilot')
+    assert.deepEqual(run.args.slice(0, 3), ['--resume', ended, '--allow-tool=action-inbox'])
+    assert.match(run.stdin, /\[Action Inbox\][\s\S]*They chose: 256 MB/)
+    const wake = await until(() => files('events').find(e => e.type === 'wake' && e.ok))
+    assert.ok(wake)
+    // handed over once: the woken session's own hooks do not deliver it again
+    assert.equal(hookAs('postToolUse', { toolName: 'bash', toolArgs: { command: 'ls' }, toolResult: { textResultForLlm: '' } }).toString(), '')
+    assert.equal(fakeRuns().filter(r => r.args.includes(ended)).length, 1)
+  })
+
+  test('a failed wake puts the reply back in the queue for the session itself', async () => {
+    const failing = 'copilot-ended-2'
+    const hookAs = (event, payload) =>
+      execFileSync('node', [join(DIST, 'hook.mjs'), event], { env, input: JSON.stringify({ sessionId: failing, cwd: repo, ...payload }), encoding: 'utf8' })
+    hookAs('sessionStart', {})
+    await call('inbox_add', { kind: 'action', title: 'Rotate the signing key', session: { id: failing, cwd: repo } })
+    hookAs('sessionEnd', { reason: 'user_exit' })
+    const n = cli('list').match(/#(\d+) \[action\] Rotate the signing key/)[1]
+    cli('reply', n, 'FAIL on purpose')
+    const failed = await until(() => files('events').find(e => e.type === 'wake' && !e.ok))
+    assert.ok(failed, 'the failed wake should be recorded')
+    assert.match(failed.detail, /exited with code 3/)
+    // the session gets it itself, as soon as it next starts
+    const out = JSON.parse(hookAs('sessionStart', {}))
+    assert.match(out.additionalContext, /Their reply: FAIL on purpose/)
+  })
+
+  test('an idle session that is still open is not woken by default', async () => {
+    const idle = 'copilot-idle-1'
+    const hookAs = (event, payload) =>
+      execFileSync('node', [join(DIST, 'hook.mjs'), event], { env, input: JSON.stringify({ sessionId: idle, cwd: repo, ...payload }) })
+    hookAs('sessionStart', {})
+    await call('inbox_add', { kind: 'action', title: 'Approve the staging deploy', session: { id: idle, cwd: repo } })
+    hookAs('agentStop', { stopReason: 'end_turn' })
+    const n = cli('list').match(/#(\d+) \[action\] Approve the staging deploy/)[1]
+    cli('reply', n, 'approved')
+    await new Promise(r => setTimeout(r, 1500))
+    assert.equal(fakeRuns().filter(r => r.args.includes(idle)).length, 0)
   })
 
   test('sessionEnd marks the session ended', () => {

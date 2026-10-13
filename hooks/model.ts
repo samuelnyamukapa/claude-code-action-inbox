@@ -61,10 +61,28 @@ export const age = (now: number, at: number): string => {
   return `${Math.floor(s / 86400)}d`
 }
 
+/**
+ * The replies a session has received. A failed wake puts a reply back in the
+ * queue, so a reply counts as delivered only when its last delivery came after
+ * its last failed wake.
+ */
+export const deliveredRefs = (events: readonly InboxEvent[]): Set<string> => {
+  const lastDelivered = new Map<string, number>()
+  const lastFailed = new Map<string, number>()
+  for (const ev of events) {
+    if (ev.type === 'delivered') lastDelivered.set(ev.ref, Math.max(lastDelivered.get(ev.ref) ?? 0, ev.at))
+    if (ev.type === 'wake' && !ev.ok) lastFailed.set(ev.ref, Math.max(lastFailed.get(ev.ref) ?? 0, ev.at))
+  }
+  const out = new Set<string>()
+  for (const [ref, at] of lastDelivered) if (at > (lastFailed.get(ref) ?? 0)) out.add(ref)
+  return out
+}
+
 /** Folds an item and its events, in time order, into what the pane shows. */
 export const foldItem = (item: Item, events: readonly InboxEvent[]): ItemView => {
   const mine = events.filter(ev => ev.itemId === item.id).sort((a, b) => a.at - b.at || a.id.localeCompare(b.id))
-  const delivered = new Set(mine.flatMap(ev => (ev.type === 'delivered' ? [ev.ref] : [])))
+  const delivered = deliveredRefs(mine)
+  const wakes = new Map(mine.flatMap(ev => (ev.type === 'wake' ? [[ev.ref, { ok: ev.ok, detail: ev.detail }] as const] : [])))
   const view: ItemView = { ...item, owner: item.sessionId, status: 'open', updatedAt: item.createdAt, feedback: [] }
   for (const ev of mine) {
     view.updatedAt = Math.max(view.updatedAt, ev.at)
@@ -76,7 +94,7 @@ export const foldItem = (item: Item, events: readonly InboxEvent[]): ItemView =>
       view.note = ev.note
     }
     if (ev.type === 'feedback') {
-      const fb: FeedbackView = { id: ev.id, text: ev.text, at: ev.at, isChoice: ev.isChoice, isDelivered: delivered.has(ev.id) }
+      const fb: FeedbackView = { id: ev.id, text: ev.text, at: ev.at, isChoice: ev.isChoice, isDelivered: delivered.has(ev.id), wake: wakes.get(ev.id) }
       view.feedback.push(fb)
     }
   }
@@ -96,7 +114,7 @@ export const pendingFor = (
   replies: { item: ItemView; event: InboxEvent & { type: 'feedback' } }[]
   notes: { item: ItemView; event: InboxEvent & { type: 'status' } }[]
 } => {
-  const delivered = new Set(events.flatMap(ev => (ev.type === 'delivered' ? [ev.ref] : [])))
+  const delivered = deliveredRefs(events)
   const replies: { item: ItemView; event: InboxEvent & { type: 'feedback' } }[] = []
   const notes: { item: ItemView; event: InboxEvent & { type: 'status' } }[] = []
   for (const item of items) {

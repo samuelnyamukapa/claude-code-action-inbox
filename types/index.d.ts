@@ -24,6 +24,8 @@ export type InboxEvent =
   | { id: string; itemId: string; at: number; type: 'delivered'; ref: string; by: string }
   | { id: string; itemId: string; at: number; type: 'claim'; by: string }
   | { id: string; itemId: string; at: number; type: 'promoted'; url: string; by: string }
+  /** A reply handed to a session by starting a turn in it from outside (Copilot's resume); ok: false puts it back in the queue. */
+  | { id: string; itemId: string; at: number; type: 'wake'; ref: string; ok: boolean; detail?: string; by: string }
 
 /** A session's heartbeat file, rewritten by that session alone. */
 export type SessionInfo = {
@@ -34,10 +36,20 @@ export type SessionInfo = {
   lastSeen: number
   isEnded?: boolean
   /** Which agent runs the session; absent means Claude Code. */
-  client?: 'claude' | 'copilot'
+  client?: 'claude' | 'copilot' | 'codex'
+  /** Whether the agent is mid-turn, where the client reports it (Copilot hooks). */
+  turn?: 'running' | 'idle'
 }
 
-export type FeedbackView = { id: string; text: string; at: number; isChoice?: boolean; isDelivered: boolean }
+export type FeedbackView = {
+  id: string
+  text: string
+  at: number
+  isChoice?: boolean
+  isDelivered: boolean
+  /** Set when the inbox tried to wake the session to hand this over. */
+  wake?: { ok: boolean; detail?: string }
+}
 
 export type ItemView = Item & {
   owner: string
@@ -53,7 +65,7 @@ export type SessionGroup = {
   sessionId: string
   branch?: string
   label?: string
-  client?: 'claude' | 'copilot'
+  client?: 'claude' | 'copilot' | 'codex'
   presence: 'live' | 'idle' | 'ended'
   isSelf: boolean
   items: ItemView[]

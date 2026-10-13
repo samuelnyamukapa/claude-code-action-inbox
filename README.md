@@ -28,7 +28,7 @@ The bar above the prompt keeps the count in view in every session:
 - **By hand.** `/inbox add Call the accountant about VAT`.
 
 **Shows it in one place**
-- An orange bar above the prompt with the open count, and a pane (`/inbox`) grouped by project, then by session. Each session header shows whether it is live, idle or ended. Blocking items come first.
+- An orange bar above the prompt with the open count (a quiet "nothing waiting" line when there is none), and a pane (`/inbox`) grouped by project, then by session. Open the pane in one session and it opens in that project's other sessions too; close it and it closes in them all. Each session header shows whether it is live, idle or ended. Blocking items come first.
 - Each item has buttons for its options (for decisions), **Reply**, **Done**, **Dismiss** and **Promote to issue**. Other sessions have an **Open session** button.
 - A toast when another session raises something. A push notification for decisions, sign-offs and blocking items, if the session is allowed to send them.
 
@@ -65,21 +65,29 @@ The bar above the prompt keeps the count in view in every session:
    To try it in one session only, use `claude --plugin-dir ~/.claude/mods/action-inbox`.
 3. Start a new session and type `/inbox`.
 
-## GitHub Copilot
+## GitHub Copilot and Codex
 
-Ask Copilot to **show your inbox**. You get the same colour-coded inbox as the Claude Code pane, with buttons to pick a decision's option, reply, mark done, dismiss, reopen or promote to an issue:
-- **In the chat**, as an interactive card, where the app supports [MCP Apps](https://modelcontextprotocol.io/extensions/apps/overview) (VS Code's Copilot Chat does).
-- **In your browser** otherwise. The inbox server opens a private page on `127.0.0.1` behind a random link, and the chat shows the link. It works while that Copilot session runs.
+Ask Copilot to **show your inbox**. It replies with an **Open your Action Inbox** link. In the GitHub Copilot app the link opens in the browser panel on the right, showing the same colour-coded inbox as the Claude Code pane, with buttons to pick a decision's option, reply, mark done, dismiss, reopen or promote to an issue. Where the app supports [MCP Apps](https://modelcontextprotocol.io/extensions/apps/overview) (VS Code's Copilot Chat does), the same view also appears as a card in the chat.
+
+The link stays the same across sessions and after a session ends: a small background process serves the page on `127.0.0.1` behind a private random path, and stops itself after six hours unused.
 
 You can also type `inbox list`, `inbox reply 3 go ahead` and so on in the chat, use the terminal command, or use the Claude Code pane if you also run Claude Code.
 
 ### Install
 
+**GitHub Copilot app:** Customize → Plugins → add the marketplace `samuelnyamukapa/claude-code-action-inbox` → install **action-inbox**.
+
 **Copilot CLI**
 ```bash
-copilot plugin install samuelnyamukapa/claude-code-action-inbox:copilot
+copilot plugin marketplace add samuelnyamukapa/claude-code-action-inbox
 ```
-Or add the repository as a marketplace (`copilot plugin marketplace add samuelnyamukapa/claude-code-action-inbox`) and install `action-inbox` from it.
+then `copilot plugin install action-inbox@action-inbox`.
+
+**Codex**
+```bash
+codex plugin marketplace add samuelnyamukapa/claude-code-action-inbox
+```
+then install **action-inbox** from `/plugins` and start a new session.
 
 **VS Code** (agent plugins, preview): clone the repository and point VS Code at the `copilot` folder in your settings:
 ```json
@@ -89,29 +97,39 @@ Or add the repository as a marketplace (`copilot plugin marketplace add samuelny
 ```
 Install it from the folder, not with *Install Plugin from Source* on the repository root: the root is the Claude Code edition.
 
-Both need **Node.js 18 or newer** on your PATH. The built files in `copilot/dist` are committed, so there is nothing to build.
+All of them need **Node.js 18 or newer** on your PATH. The built files in `copilot/dist` are committed, so there is nothing to build.
 
 ### What you get
 
 | Part | What it does |
 |---|---|
 | MCP server `action-inbox` | `inbox_add`, `inbox_resolve` and `inbox_list` (the same tools Claude gets); `inbox_view`, the clickable inbox; and `inbox_command`, which runs your own `inbox …` commands when you type them in chat. Clients that show MCP prompts also get an `inbox` prompt. |
-| Hooks | Tell the server which session is calling, so items are filed under it. Log a *Review & merge PR #N* item on `gh pr create` and close it on `gh pr merge`. Show *Waiting on your answer* while Copilot's `ask_user` question is open. Deliver your replies. |
-| Skill `action-inbox` | The instructions: log what the user owes, act on `[Action Inbox]` replies, pass `inbox …` commands through. |
+| Hooks | Tell the server which session is calling, so items are filed under it. Log a *Review & merge PR #N* item on `gh pr create` and close it on `gh pr merge`. Show *Waiting on your answer* while Copilot's `ask_user` question is open. Deliver your replies. Copilot reads `com.github.copilot/hooks/hooks.json`; Codex reads `hooks/hooks.json`. |
+| Skill `action-inbox` | The instructions: log what the user owes, show the inbox link, act on `[Action Inbox]` replies, pass `inbox …` commands through. |
+| Background process | Serves the inbox page at its stable address, and wakes Copilot sessions that have replies waiting (below). |
 | `dist/cli.mjs` | The inbox from a terminal: `node copilot/dist/cli.mjs list`, `… reply 3 go ahead`, `… pick 3 2`, `… done 3`, `… issue 3`, `… add <text>`. Use `--cwd <dir>` to pick the project. |
 
-### How replies reach a Copilot session
+### How replies reach a session
 
-Copilot has no way for a plugin to start a turn in an idle session, so a reply waits for the session's next step:
-- at its **next shell command or inbox tool call**, as added context (the hook skips other tools, such as file edits, so it doesn't slow every step down);
+**A Copilot session nobody has open is woken.** The background process resumes it with your reply as its prompt (`copilot --resume <session>`, the reply on standard input), so it acts on your answer straight away. It never wakes a session that some process has open (Copilot keeps an `inuse.<pid>.hold` file in the session's folder while one does) or one that is mid-turn, so it can't race the app. The woken turn may use the inbox's own tools; anything else it would need approval for, it can't do unattended unless you allow it (below). This needs Copilot CLI's `copilot` command on your PATH; if it isn't, the inbox says so next to your reply, and the session gets the reply the next time it runs.
+
+**A session that is open** gets the reply at its next step:
+- at its **next shell command or inbox tool call**, as added context;
 - when it **finishes a turn**, by starting one more turn with your reply;
-- at the **start** of a resumed session.
+- in Codex and VS Code, with **your next message** to it.
 
-If the session is idle, send it any prompt (even "continue") and the reply arrives with it.
+Copilot gives plugins no way to start a turn in a session that is open, so if it is open and idle, send it any message (even "continue").
+
+Settings go in `~/.claude/action-inbox/config.json`:
+```json
+{ "wake": "on", "wakeArgs": ["--allow-all-tools"] }
+```
+`wake` is `on` (default) or `off`. `wakeArgs` are extra flags for the woken run, such as `--allow-all-tools`. Only plain flags and values are accepted: no spaces, quotes or parentheses, because on Windows they pass through a shell. Each woken run's output is in `~/.claude/action-inbox/.wake-logs/<session>.log`.
 
 ### Differences from the Claude Code edition
 
-- The inbox is a card in the chat or a browser page, not a docked pane, and there is no bar above the prompt, no toasts and no push notifications.
+- The inbox is a page in the app's browser panel (or a card in the chat), not a docked pane. Whether the panel stays open as you switch sessions is up to the app; the link is the same in every session, so it shows the same inbox. Copilot and Codex give plugins no place above the prompt, so there is no summary bar, and there are no toasts or push notifications.
+- Codex sessions are labelled *Codex* and get replies from their hooks; they are not woken.
 - *Open session* works only for Claude Code sessions in the desktop app.
 - Without hooks (for example, in a client that only loads the MCP server and skill), items are filed under a *Copilot session* group and replies are not delivered automatically; `inbox_list` still shows them.
 

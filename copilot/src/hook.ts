@@ -34,6 +34,8 @@ type Payload = {
   prompt?: string
   /** Claude-shaped callers (VS Code, Codex) want answers inside hookSpecificOutput. */
   isClaudeShape: boolean
+  /** Which agent is calling: Codex's payloads alone carry a turn_id. */
+  client: 'copilot' | 'codex'
 }
 
 const parseMaybe = (value: unknown): Record<string, unknown> => {
@@ -64,6 +66,7 @@ const normalise = (raw: Record<string, unknown>): Payload => ({
   resultText: textOf(raw.toolResult ?? raw.tool_response),
   prompt: typeof (raw.initialPrompt ?? raw.prompt) === 'string' ? String(raw.initialPrompt ?? raw.prompt) : undefined,
   isClaudeShape: raw.sessionId === undefined && (raw.session_id !== undefined || raw.hook_event_name !== undefined),
+  client: raw.turn_id !== undefined ? 'codex' : 'copilot',
 })
 
 // each caller rejects the other's answer shape, so answer in the caller's own
@@ -87,7 +90,7 @@ const handle = (event: string, p: Payload): unknown => {
     rememberWhere(p.sessionId, where)
     saveProjectMeta(where)
     const project = loadProject(where)
-    heartbeat(project, { sessionId: p.sessionId, branch: where.branch, cwd: p.cwd, client: 'copilot', label: p.prompt && clip(p.prompt, 60) })
+    heartbeat(project, { sessionId: p.sessionId, branch: where.branch, cwd: p.cwd, client: p.client, turn: 'idle', label: p.prompt && clip(p.prompt, 60) })
     // a "waiting" item outlives its question only when the process died mid-question
     closeWaiting(project, p.sessionId, 'dismissed', 'session restarted')
     const { replies, notes } = takePending(project, p.sessionId)
@@ -96,13 +99,13 @@ const handle = (event: string, p: Payload): unknown => {
 
   const where = recallWhere(p.sessionId, p.cwd)
   const project = loadProject(where)
-  const beat = (isEnded?: boolean) =>
-    heartbeat(project, { sessionId: p.sessionId, branch: where.branch, cwd: p.cwd, client: 'copilot', isEnded })
+  // the turn state tells the waker (wake.ts) whether starting a turn would interrupt one
+  const beat = (state: { turn: 'running' | 'idle'; isEnded?: boolean; label?: string }) =>
+    heartbeat(project, { sessionId: p.sessionId, branch: where.branch, cwd: p.cwd, client: p.client, ...state })
 
   if (event === 'userPromptSubmitted') {
-    if (p.prompt && !p.prompt.startsWith('[Action Inbox]')) {
-      heartbeat(project, { sessionId: p.sessionId, branch: where.branch, cwd: p.cwd, client: 'copilot', label: clip(p.prompt, 60) })
-    }
+    const isOwnPrompt = Boolean(p.prompt) && !p.prompt?.startsWith('[Action Inbox]')
+    beat({ turn: 'running', label: isOwnPrompt ? clip(p.prompt ?? '', 60) : undefined })
     // Copilot CLI drops this hook's output; Claude-shaped callers take context here,
     // which is how a reply reaches an idle session with the user's next prompt
     if (!p.isClaudeShape) return undefined
@@ -131,7 +134,7 @@ const handle = (event: string, p: Payload): unknown => {
   }
 
   if (event === 'postToolUse') {
-    beat()
+    beat({ turn: 'running' })
     if (/inbox_add$/.test(p.toolName)) {
       // when the server could not be told the session, claim the item now
       const id = p.resultText.match(/\bib_[a-z0-9]+\b/)?.[0]
@@ -170,15 +173,15 @@ const handle = (event: string, p: Payload): unknown => {
   }
 
   if (event === 'agentStop') {
-    beat()
     // an answer that arrived while the agent worked starts one more turn
     const { replies, notes } = takePending(project, p.sessionId, { onlyIfReplies: true })
+    beat({ turn: replies.length ? 'running' : 'idle' })
     return replies.length ? { decision: 'block', reason: [...notes, ...replies].join('\n\n') } : undefined
   }
 
   if (event === 'sessionEnd') {
     closeWaiting(project, p.sessionId, 'dismissed', 'session ended')
-    beat(true)
+    beat({ turn: 'idle', isEnded: true })
   }
   return undefined
 }

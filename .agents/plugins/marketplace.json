@@ -1,0 +1,11 @@
+{
+  "name": "action-inbox",
+  "plugins": [
+    {
+      "name": "action-inbox",
+      "source": { "source": "local", "path": "./copilot" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Productivity"
+    }
+  ]
+}

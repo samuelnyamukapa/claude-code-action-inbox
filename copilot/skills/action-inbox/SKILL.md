@@ -21,7 +21,7 @@ The user runs several agent sessions at once (GitHub Copilot and Claude Code) an
 
 ## When the user wants to see their inbox
 
-Call `inbox_view`. It shows the inbox as a clickable, colour-coded view in the chat where the app supports it (MCP Apps), with buttons for each decision's options, Reply, Done, Dismiss and Promote to issue. Where the chat can only show text, it opens the same view in the user's browser and gives them the link. Pass `open_in_browser: true` if they ask for it in the browser or say they cannot see it.
+Call `inbox_view`, then **always** give the user its "Open your Action Inbox" link as a markdown link. Clicking it opens the clickable, colour-coded inbox in the app's browser panel (in the GitHub Copilot app, the panel on the right), with buttons for each decision's options, Reply, Done, Dismiss and Promote to issue. The link stays the same across sessions. Where the app supports MCP Apps (VS Code), the same view also appears as a card in the chat. Pass `open_in_browser: true` only if they ask for it in their normal browser.
 
 ## When the user types "inbox …"
 

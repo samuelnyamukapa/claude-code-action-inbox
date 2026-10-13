@@ -2,6 +2,7 @@
 // GitHub Copilot and any other MCP client. No dependencies: the protocol
 // surface it needs is small.
 import { appendFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 
@@ -16,6 +17,7 @@ import {
   loadProject,
   locate,
   pollPrs,
+  recallWhere,
   runCommand,
   saveProjectMeta,
   setStatus,
@@ -26,9 +28,11 @@ import {
   type Where,
 } from './inbox'
 import INBOX_HTML from './ui/inbox.html'
-import { openBrowser, startWeb } from './web'
+import { ensureDaemon } from './daemon'
+import { openBrowser } from './web'
+import { readConfig } from './wake'
 
-const VERSION = '0.4.1'
+const VERSION = '0.5.0'
 const UI_URI = 'ui://action-inbox/inbox.html'
 const UI_MIME = 'text/html;profile=mcp-app'
 const PROTOCOLS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05']
@@ -46,9 +50,6 @@ let rootCwd: string | undefined
 let canListRoots = false
 // whether the client draws MCP Apps (interactive views in the chat)
 let canShowApps = false
-// the last session a hook named, for the browser page, which has no session of its own
-let lastSession: { id?: string; cwd?: string } = {}
-let hasOpenedBrowser = false
 const located = new Map<string, Where>()
 
 const whereOf = (cwd: string | undefined): Where => {
@@ -158,7 +159,7 @@ const TOOLS = [
       type: 'object',
       properties: {
         scope: { type: 'string', enum: ['project', 'all'], description: 'This project (default) or every project' },
-        open_in_browser: { type: 'boolean', description: 'Also open the view in the browser; use it when the user asks or cannot see the view in the chat' },
+        open_in_browser: { type: 'boolean', description: "Also open it in the computer's default browser; only when the user asks for that" },
         session: SESSION_PROP,
       },
     },
@@ -177,6 +178,7 @@ const APP_TOOL = {
       id: { type: 'string' },
       text: { type: 'string' },
       projectKey: { type: 'string' },
+      itemProjectKey: { type: 'string' },
       scope: { type: 'string', enum: ['project', 'all'] },
       showClosed: { type: 'boolean' },
       session: SESSION_PROP,
@@ -188,22 +190,28 @@ const APP_TOOL = {
 
 type ToolOut = { text: string; isError?: boolean; structured?: Json }
 
+// the background process that serves the page and wakes sessions sits next to this file
+const DAEMON_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'daemon.mjs')
+
 /** What the inbox view draws, and a plain-text version for clients that only show text. */
 const viewPayload = async (where: Where, viewer: string, opts: ViewOptions, message?: string): Promise<ToolOut> => {
   const snapshot = inboxView(where, viewer, opts)
-  const webUrl = await startWeb(INBOX_HTML, webAct).catch(() => undefined)
+  const base = await ensureDaemon(DAEMON_SCRIPT).catch(() => undefined)
+  const webUrl = base ? `${base}?project=${encodeURIComponent(where.key)}` : undefined
   const self = snapshot.projects.find(p => p.isSelf)
-  const lines = [phoneList(self).replace(/\/inbox /g, 'inbox ')]
-  if (webUrl) lines.push('', `Clickable inbox in your browser (works while this session runs): ${webUrl}`)
+  const lines: string[] = []
+  // a link the app can open in its own browser panel; the guide asks the agent to show it
+  if (webUrl) lines.push(`[Open your Action Inbox](${webUrl})`, '')
+  lines.push(phoneList(self).replace(/\/inbox /g, 'inbox '))
   return {
     text: lines.join('\n'),
-    structured: { snapshot, view: { ...opts, projectKey: where.key, projectName: where.name }, webUrl, message },
+    structured: { snapshot, view: { ...opts, projectKey: where.key, projectName: where.name }, webUrl, message, wake: readConfig().wake },
   }
 }
 
 const optsOf = (input: Json): ViewOptions => ({ scope: input.scope === 'all' ? 'all' : 'project', showClosed: input.showClosed === true })
 
-/** A button press in the inbox view, from the chat or the browser. */
+/** A button press in the inbox card in the chat. */
 const uiAct = async (input: Json, viewer: string, where: Where): Promise<ToolOut> => {
   const action = String(input.action ?? 'refresh')
   let message: string | undefined
@@ -212,34 +220,26 @@ const uiAct = async (input: Json, viewer: string, where: Where): Promise<ToolOut
       action: action as UiAction['action'],
       id: String(input.id ?? ''),
       text: typeof input.text === 'string' ? input.text : undefined,
-      projectKey: String(input.projectKey ?? where.key),
+      projectKey: String(input.itemProjectKey ?? input.projectKey ?? where.key),
     })
   }
   return viewPayload(where, viewer, optsOf(input), message)
 }
 
-// the browser page has no session of its own: it acts for the last one a hook named
-const webAct = async (body: Json): Promise<Json | undefined> => {
-  const where = whereOf(lastSession.cwd)
-  return (await uiAct(body, lastSession.id ?? UNKNOWN_SESSION, where)).structured
-}
-
 const callTool = async (name: string, input: Json): Promise<ToolOut> => {
   const session = (input.session ?? {}) as { id?: string; cwd?: string }
   const sessionId = typeof session.id === 'string' && session.id ? session.id : UNKNOWN_SESSION
-  if (sessionId !== UNKNOWN_SESSION) lastSession = { id: sessionId, cwd: typeof session.cwd === 'string' ? session.cwd : undefined }
-  const where = whereOf(typeof session.cwd === 'string' && session.cwd ? session.cwd : undefined)
+  const cwd = typeof session.cwd === 'string' && session.cwd ? session.cwd : undefined
+  // a session the hooks know is in the project they already worked out
+  const where = sessionId !== UNKNOWN_SESSION && cwd ? recallWhere(sessionId, cwd) : whereOf(cwd)
   const project = loadProject(where)
 
   if (name === 'inbox_view') {
     const out = await viewPayload(where, sessionId, optsOf(input))
     const webUrl = out.structured?.webUrl
-    // a client that cannot draw the view gets the browser page instead, once unasked
-    const shouldOpen = input.open_in_browser === true || (!canShowApps && !hasOpenedBrowser)
-    if (shouldOpen && typeof webUrl === 'string') {
-      hasOpenedBrowser = true
+    if (input.open_in_browser === true && typeof webUrl === 'string') {
       openBrowser(webUrl)
-      out.text += '\nOpened it in the browser.'
+      out.text += '\nOpened it in the default browser.'
     }
     return out
   }
@@ -328,6 +328,10 @@ const handle = async (msg: Json): Promise<Json | undefined> => {
       }
     }
     case 'notifications/initialized':
+      // the background process wakes sessions whether or not anyone opens the inbox
+      void ensureDaemon(DAEMON_SCRIPT).catch(() => undefined)
+      void refreshRoots()
+      return undefined
     case 'notifications/roots/list_changed':
       void refreshRoots()
       return undefined
