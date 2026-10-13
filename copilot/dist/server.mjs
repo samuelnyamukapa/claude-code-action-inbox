@@ -490,7 +490,7 @@ var openBrowser = (url) => {
 };
 
 // copilot/src/server.ts
-var VERSION = "0.4.0";
+var VERSION = "0.4.1";
 var UI_URI = "ui://action-inbox/inbox.html";
 var UI_MIME = "text/html;profile=mcp-app";
 var PROTOCOLS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];

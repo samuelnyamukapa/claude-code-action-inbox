@@ -99,6 +99,21 @@ describe('Copilot edition', () => {
     assert.match(read.contents[0].text, /ui\/initialize/)
   })
 
+  test('the tool hooks run only for the tools they act on', () => {
+    const config = JSON.parse(readFileSync(join(DIST, '..', 'com.github.copilot', 'hooks', 'hooks.json'), 'utf8'))
+    // Copilot compiles each matcher as ^(?:PATTERN)$
+    const matcher = event => new RegExp(`^(?:${config.hooks[event][0].matcher})$`)
+    const post = matcher('postToolUse')
+    for (const tool of ['bash', 'powershell', 'ask_user', 'action-inbox-inbox_add', 'mcp__action_inbox__inbox_view', 'action-inbox-inbox_resolve']) {
+      assert.ok(post.test(tool), `postToolUse should run after ${tool}`)
+    }
+    for (const tool of ['view', 'edit', 'create', 'grep', 'glob', 'web_fetch', 'task']) {
+      assert.ok(!post.test(tool), `postToolUse should skip ${tool}`)
+    }
+    const pre = matcher('preToolUse')
+    assert.ok(pre.test('ask_user') && pre.test('action-inbox-inbox_view') && !pre.test('bash'))
+  })
+
   test('sessionStart writes a heartbeat and injects the guide', () => {
     const out = hook('sessionStart', { source: 'new', initialPrompt: 'Ship the cache layer' })
     assert.match(out.additionalContext, /# Action Inbox/)
