@@ -35,5 +35,6 @@ Pass their words after "inbox" to `inbox_command` unchanged and show them the re
 | `inbox done <n> [note]` / `inbox dismiss <n>` | Close item n |
 | `inbox issue <n>` | Create a GitHub issue from item n |
 | `inbox add <text>` | Add their own item |
+| `inbox doctor` | Explain why replies are or are not waking sessions: the background process, the `copilot` command, the wake setting, and each waiting session's state |
 
 Never call `inbox_command` on your own initiative to answer or close the user's items.

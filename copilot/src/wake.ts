@@ -1,8 +1,10 @@
-// Hands the user's replies to Copilot sessions that nobody has open, by resuming
-// the session with the reply as its prompt (`copilot --resume <id>`, prompt on
-// stdin). Copilot has no API to message a session that is open, and resuming one
-// that is would race the app, so a session another process holds is left alone:
-// it gets the reply from the hooks at its next step or message.
+// Hands the user's replies to Copilot sessions by resuming the session with the
+// reply as its prompt (`copilot --resume <id>`, prompt on stdin). Copilot has no
+// API to message a session that is open, so by default a session another process
+// holds open is left alone: it gets the reply from the hooks at its next step or
+// message. With "wake": "always" it is resumed anyway (never mid-turn); Copilot
+// allows two processes on one session and its history is append-only, but the
+// app holding it may not show the new turn until the session is reopened.
 import { spawn } from 'node:child_process'
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -12,10 +14,13 @@ import type { SessionInfo } from '../../types'
 import { pendingFor, replyPrompt, statusNote } from '../../hooks/model'
 import { addEvent, heartbeat, inboxHome, listProjects, loadProject, type Project } from './inbox'
 
-export type WakeMode = 'on' | 'off'
+export type WakeMode = 'on' | 'always' | 'off'
 
 export type Config = {
-  /** on (default): wake sessions nobody has open; off: never */
+  /**
+   * on (default): wake sessions nobody has open; always: also sessions open in
+   * another process, such as the GitHub Copilot app (never mid-turn); off: never
+   */
   wake: WakeMode
   /** Extra arguments for the resumed run, e.g. ["--allow-all-tools"] */
   wakeArgs: string[]
@@ -30,7 +35,7 @@ export const readConfig = (): Config => {
   try {
     const raw = JSON.parse(readFileSync(configPath(), 'utf8')) as Partial<Config>
     return {
-      wake: raw.wake === 'off' ? 'off' : 'on',
+      wake: raw.wake === 'off' || raw.wake === 'always' ? raw.wake : 'on',
       // these reach a shell on Windows, so only plain flags and values pass
       wakeArgs: Array.isArray(raw.wakeArgs) ? raw.wakeArgs.filter(a => typeof a === 'string' && /^[\w=.:,@/+-]+$/.test(a)) : [],
     }
@@ -39,7 +44,7 @@ export const readConfig = (): Config => {
   }
 }
 
-const copilotHome = () => process.env.COPILOT_HOME ?? join(homedir(), '.copilot')
+export const copilotHome = () => process.env.COPILOT_HOME ?? join(homedir(), '.copilot')
 
 const isAlive = (pid: number): boolean => {
   try {
@@ -51,35 +56,75 @@ const isAlive = (pid: number): boolean => {
   }
 }
 
+export type Hold = { file: string; pid: number; isLive: boolean }
+
 /**
- * Whether some process has the session open. Copilot keeps an inuse.<pid>.hold
- * file in the session's folder while a process has it loaded. Undefined when the
+ * The in-use locks on a session's folder. Copilot keeps an inuse.<pid>.hold file
+ * there while a process has the session loaded, locked, and deletes it on a clean
+ * exit. A process that was killed leaves its file behind, and Windows may have
+ * given its id to another process since, so on Windows a hold counts only while
+ * the file is still locked (reading it fails with EBUSY). Undefined when the
  * folder cannot be found (another Copilot home, or a client that keeps none).
  */
-export const isHeld = (sessionId: string): boolean | undefined => {
+export const holdsOf = (sessionId: string): Hold[] | undefined => {
+  const dir = join(copilotHome(), 'session-state', sessionId)
   let names: string[]
   try {
-    names = readdirSync(join(copilotHome(), 'session-state', sessionId))
+    names = readdirSync(dir)
   } catch {
     return undefined
   }
-  return names.some(name => {
+  const holds: Hold[] = []
+  for (const name of names) {
     const pid = Number(name.match(/^inuse\.(\d+)\.hold$/)?.[1])
-    return pid > 0 && pid !== process.pid && isAlive(pid)
-  })
+    if (!(pid > 0)) continue
+    const file = join(dir, name)
+    let isLive = false
+    if (pid !== process.pid) {
+      if (process.platform === 'win32') {
+        try {
+          readFileSync(file)
+        } catch (err) {
+          isLive = (err as NodeJS.ErrnoException).code === 'EBUSY'
+        }
+      } else {
+        isLive = isAlive(pid)
+      }
+    }
+    holds.push({ file, pid, isLive })
+  }
+  return holds
+}
+
+export const isHeld = (sessionId: string): boolean | undefined => holdsOf(sessionId)?.some(h => h.isLive)
+
+/** Why a session cannot be woken now, or undefined when it can. */
+export type WakeBlock = 'not-copilot' | 'off' | 'mid-turn' | 'open' | 'unknown-open'
+
+export const wakeBlock = (session: SessionInfo | undefined, cfg: Config, now: number): WakeBlock | undefined => {
+  if (!session || session.client !== 'copilot' || !/^[\w-]+$/.test(session.sessionId)) return 'not-copilot'
+  if (cfg.wake === 'off') return 'off'
+  // never start a turn on top of one; a "running" older than this is a session that died mid-turn
+  if (session.turn === 'running' && now - session.lastSeen < RUNNING_STALE_MS) return 'mid-turn'
+  const held = isHeld(session.sessionId)
+  if (held === true && cfg.wake !== 'always') return 'open'
+  // no folder to check: only a session that said it ended is surely not open
+  if (held === undefined && !session.isEnded && cfg.wake !== 'always') return 'unknown-open'
+  return undefined
 }
 
 /** Whether a session may be given a turn now. */
-export const canWake = (session: SessionInfo | undefined, cfg: Config, now: number): boolean => {
-  if (!session || session.client !== 'copilot' || cfg.wake === 'off') return false
-  if (!/^[\w-]+$/.test(session.sessionId)) return false
-  // never start a turn on top of one; a "running" older than this is a session that died mid-turn
-  if (session.turn === 'running' && now - session.lastSeen < RUNNING_STALE_MS) return false
-  const held = isHeld(session.sessionId)
-  if (held === true) return false
-  // no folder to check: only a session that said it ended is surely not open
-  if (held === undefined) return session.isEnded === true
-  return true
+export const canWake = (session: SessionInfo | undefined, cfg: Config, now: number): boolean => wakeBlock(session, cfg, now) === undefined
+
+/** For the inbox view: each Copilot session's wake status, "ready" when it can be woken. */
+export const wakeStatusOf = (sessions: readonly SessionInfo[], cfg: Config = readConfig()): Record<string, WakeBlock | 'ready'> => {
+  const now = Date.now()
+  const out: Record<string, WakeBlock | 'ready'> = {}
+  for (const session of sessions) {
+    if (session.client !== 'copilot') continue
+    out[session.sessionId] = wakeBlock(session, cfg, now) ?? 'ready'
+  }
+  return out
 }
 
 // a file created with "wx" exists once: whichever process makes it owns the wake

@@ -216,19 +216,26 @@
   const renderItem = (item, project, group, num) => {
     const presence = group.presence
     const client = group.client
-    const ended = presence === 'ended'
     const isOpen = item.status === 'open'
     const kindCls = !isOpen ? 'closed' : item.blocking ? 'blocking' : item.kind === 'waiting' ? 'waiting' : ''
     const canReply = isOpen && item.kind !== 'waiting'
     const repo = item.pr ? item.pr.repo : /^[\w.-]+\/[\w.-]+$/.test(project.name) ? project.name : null
     const canIssue = isOpen && item.kind !== 'waiting' && !item.issueUrl && repo
     const base = { id: item.id, itemProjectKey: project.key }
-    const wakeMode = payload.wake || 'on'
     const delivered = fb => {
       if (fb.wake && fb.wake.ok) return 'woke that session with it'
       if (fb.isDelivered) return 'delivered'
       if (fb.wake && !fb.wake.ok) return `couldn't wake that session (${fb.wake.detail || 'error'}); it gets this with its next message`
-      if (client === 'copilot' && wakeMode !== 'off') return ended ? 'waking that session…' : 'wakes that session once it is closed, or reaches it at its next step or message'
+      if (client === 'copilot') {
+        // say why it has not gone yet, so a label never sits on "waking" for nothing
+        if (payload.daemon === false) return "the inbox's background process isn't running, so it can't wake that session; it gets this at its next step or message"
+        const status = (payload.wakeStatus || {})[group.sessionId]
+        if (status === 'ready') return 'waking that session…'
+        if (status === 'open') return 'that session is open in Copilot, so it gets this at its next step or message ("wake": "always" in config.json wakes it anyway)'
+        if (status === 'mid-turn') return 'that session is mid-turn; it gets this at its next step'
+        if (status === 'off') return 'waking is off; it gets this at its next step or message'
+        return 'it gets this at its next step or message'
+      }
       return presence === 'live' ? 'delivered at its next step' : 'delivered when that session resumes'
     }
 
@@ -317,7 +324,7 @@
   }
 
   if (isApp) {
-    rpc('ui/initialize', { protocolVersion: '2026-01-26', appCapabilities: { availableDisplayModes: ['inline'] }, clientInfo: { name: 'action-inbox', version: '0.5.0' } })
+    rpc('ui/initialize', { protocolVersion: '2026-01-26', appCapabilities: { availableDisplayModes: ['inline'] }, clientInfo: { name: 'action-inbox', version: '0.5.1' } })
       .then(result => {
         applyHost(result && result.hostContext)
         canOpenLinks = Boolean(result && result.hostCapabilities && result.hostCapabilities.openLinks)

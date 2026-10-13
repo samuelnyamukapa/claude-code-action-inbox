@@ -111,20 +111,22 @@ All of them need **Node.js 18 or newer** on your PATH. The built files in `copil
 
 ### How replies reach a session
 
-**A Copilot session nobody has open is woken.** The background process resumes it with your reply as its prompt (`copilot --resume <session>`, the reply on standard input), so it acts on your answer straight away. It never wakes a session that some process has open (Copilot keeps an `inuse.<pid>.hold` file in the session's folder while one does) or one that is mid-turn, so it can't race the app. The woken turn may use the inbox's own tools; anything else it would need approval for, it can't do unattended unless you allow it (below). This needs Copilot CLI's `copilot` command on your PATH; if it isn't, the inbox says so next to your reply, and the session gets the reply the next time it runs.
+**A Copilot session nobody has open is woken.** The background process resumes it with your reply as its prompt (`copilot --resume <session>`, the reply on standard input), so it acts on your answer straight away. The woken turn may use the inbox's own tools; anything else it would need approval for, it can't do unattended unless you allow it (below). This needs Copilot CLI's `copilot` command on your PATH.
 
-**A session that is open** gets the reply at its next step:
+**A session that is open** in the GitHub Copilot app or a terminal is, by default, left alone. Copilot keeps a locked `inuse.<pid>.hold` file in the session's folder while a process has it open; a lock left behind by a process that crashed or was killed no longer counts. An open session gets the reply at its next step:
 - at its **next shell command or inbox tool call**, as added context;
 - when it **finishes a turn**, by starting one more turn with your reply;
 - in Codex and VS Code, with **your next message** to it.
 
-Copilot gives plugins no way to start a turn in a session that is open, so if it is open and idle, send it any message (even "continue").
+Copilot gives plugins no way to start a turn in a session that is open. To have the inbox wake open sessions anyway, set `"wake": "always"`: it resumes them alongside the app (never mid-turn). Copilot allows that and its history is append-only, so nothing is lost, but the app may not show the new turn until you reopen the session.
+
+Each reply in the inbox says where it stands: woken, waiting because the session is open or mid-turn, waking off, or the background process not running. To see the whole picture, type `inbox doctor` in the chat (or run `node <plugin>/dist/cli.mjs doctor`): it reports the background process, the `copilot` command, the wake setting, and every session with replies waiting and why.
 
 Settings go in `~/.claude/action-inbox/config.json`:
 ```json
 { "wake": "on", "wakeArgs": ["--allow-all-tools"] }
 ```
-`wake` is `on` (default) or `off`. `wakeArgs` are extra flags for the woken run, such as `--allow-all-tools`. Only plain flags and values are accepted: no spaces, quotes or parentheses, because on Windows they pass through a shell. Each woken run's output is in `~/.claude/action-inbox/.wake-logs/<session>.log`.
+`wake` is `on` (default: sessions nobody has open), `always` (open ones too) or `off`. `wakeArgs` are extra flags for the woken run, such as `--allow-all-tools`. Only plain flags and values are accepted: no spaces, quotes or parentheses, because on Windows they pass through a shell. Each woken run's output is in `~/.claude/action-inbox/.wake-logs/<session>.log`.
 
 ### Differences from the Claude Code edition
 
