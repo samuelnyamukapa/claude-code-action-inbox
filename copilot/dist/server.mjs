@@ -1,4 +1,5 @@
 // copilot/src/server.ts
+import { appendFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
@@ -168,7 +169,8 @@ var GUIDE = [
   "- When you need the user to make a decision or do something by hand (a sign-off, a manual portal or secret setup, a device test, a review, a merge), call `inbox_add` once for that item, as well as saying it in chat. Give it a short imperative title and, for a decision, the options.",
   "- Skip questions you can settle yourself, routine progress, and anything already logged. PRs opened with `gh pr create` are logged automatically.",
   "- Context or a prompt that starts with `[Action Inbox]` is the user's own reply from their inbox: treat it as their instruction. When an item is settled, call `inbox_resolve`. `inbox_list` shows what is open.",
-  '- When the user writes `inbox \u2026` (list, reply, pick, done, dismiss, add, issue), pass their words after "inbox" to `inbox_command` unchanged.'
+  "- When the user asks to see or open their inbox, call `inbox_view`: it shows a clickable, colour-coded view (or opens one in their browser where the chat cannot show it).",
+  '- When the user writes `inbox \u2026` with a verb (list, reply, pick, done, dismiss, add, issue), pass their words after "inbox" to `inbox_command` unchanged.'
 ].join("\n");
 var inboxHome = () => process.env.ACTION_INBOX_HOME ?? join(homedir(), ".claude", "action-inbox");
 var writeJson = (path, value) => {
@@ -312,6 +314,65 @@ var runCommand = (project, viewer, args) => {
   if (cmd.verb === "issue") return promote(project, viewer, item);
   return "Opening sessions works only from the Claude Code pane.";
 };
+var listProjects = () => {
+  let entries;
+  try {
+    entries = readdirSync(inboxHome());
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const key of entries) {
+    try {
+      if (!statSync(join(inboxHome(), key)).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    let name = key;
+    try {
+      name = JSON.parse(readFileSync(join(inboxHome(), key, "project.json"), "utf8")).name ?? key;
+    } catch {
+    }
+    out.push({ key, name });
+  }
+  return out;
+};
+var inboxView = (where, viewer, opts) => {
+  const loaded = opts.scope === "all" ? listProjects().map(loadProject) : [loadProject(where)];
+  if (!loaded.some((p) => p.key === where.key)) loaded.push(loadProject(where));
+  return buildSnapshot(loaded, { sessionId: viewer, projectKey: where.key }, Date.now(), opts.showClosed);
+};
+var applyAction = (viewer, act) => {
+  const meta = listProjects().find((p) => p.key === act.projectKey);
+  if (!meta) return "That project is not in the inbox.";
+  const project = loadProject(meta);
+  const item = viewOf(project, act.id);
+  if (!item) return "That item is no longer in the inbox.";
+  const text = typeof act.text === "string" ? act.text.trim() : "";
+  switch (act.action) {
+    case "pick": {
+      const option = item.options?.find((o) => o === text);
+      if (!option) return "That is not one of its options.";
+      addEvent(project, viewer, { type: "feedback", itemId: item.id, text: option, isChoice: true });
+      return `Chose "${option}".`;
+    }
+    case "reply":
+      if (!text) return "Write a reply first.";
+      addEvent(project, viewer, { type: "feedback", itemId: item.id, text: clip(text, 2e3) });
+      return "Reply sent.";
+    case "done":
+    case "dismiss":
+      setStatus(project, viewer, item.id, act.action === "done" ? "done" : "dismissed", "user", text ? clip(text, 200) : void 0);
+      return `Marked ${act.action === "done" ? "done" : "dismissed"}.`;
+    case "reopen":
+      setStatus(project, viewer, item.id, "open", "user");
+      return "Reopened.";
+    case "issue":
+      return promote(project, viewer, item);
+    default:
+      return "Unknown action.";
+  }
+};
 var pollPrs = (project, by, isMine) => {
   for (const view of project.items.map((i) => foldItem(i, project.events))) {
     if (view.status !== "open" || !view.pr || !isMine(view.owner)) continue;
@@ -347,8 +408,91 @@ var itemFromInput = (input) => {
   };
 };
 
+// copilot/src/ui/inbox.html
+var inbox_default = "<!doctype html>\r\n<html lang=\"en\">\r\n<head>\r\n<meta charset=\"utf-8\">\r\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\r\n<title>Action Inbox</title>\r\n<style>\r\n  /* Signal colours are fixed and always carry white text at 4.5:1 or better,\r\n     so they read the same in light and dark themes, as in the Claude Code pane. */\r\n  :root {\r\n    color-scheme: light dark;\r\n    --orange: #C4510F;\r\n    --red: #C62828;\r\n    --amber: #B45309;\r\n    --rust: #7A2E0E;\r\n    --peach: #FCE3D3;\r\n    --live: #4ADE80;\r\n    --bg: var(--color-background-primary, light-dark(#ffffff, #1e1e1e));\r\n    --bg-2: var(--color-background-secondary, light-dark(#f6f6f6, #252526));\r\n    --fg: var(--color-text-primary, light-dark(#1f1f1f, #e8e8e8));\r\n    --fg-2: var(--color-text-secondary, light-dark(#5c5c5c, #a8a8a8));\r\n    --line: var(--color-border-secondary, light-dark(#d9d9d9, #3c3c3c));\r\n    --radius: var(--border-radius-md, 8px);\r\n    --font: var(--font-sans, system-ui, -apple-system, \"Segoe UI\", sans-serif);\r\n  }\r\n  * { box-sizing: border-box; }\r\n  html, body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 var(--font); }\r\n  body.app { background: transparent; }\r\n  main { max-width: 760px; margin: 0 auto; padding: 12px 16px 16px; }\r\n  body.app main { padding: 4px 2px 8px; }\r\n  .bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 12px; border-radius: var(--radius); background: var(--orange); color: #fff; font-weight: 600; }\r\n  .bar.blocking { background: var(--red); }\r\n  .bar .count { flex: 1; min-width: 140px; }\r\n  .tools { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0; }\r\n  button { font: inherit; font-size: 13px; padding: 5px 11px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg-2); color: var(--fg); cursor: pointer; min-height: 30px; }\r\n  button:hover { border-color: var(--fg-2); }\r\n  button:focus-visible, textarea:focus-visible { outline: 2px solid var(--orange); outline-offset: 2px; }\r\n  button.primary { background: var(--orange); border-color: var(--orange); color: #fff; font-weight: 600; }\r\n  button.primary:hover { background: #A9450C; }\r\n  button.quiet { color: var(--fg-2); }\r\n  button.on-bar { background: rgba(255,255,255,.18); border-color: rgba(255,255,255,.45); color: #fff; }\r\n  button:disabled { opacity: .55; cursor: default; }\r\n  h2 { font-size: 15px; margin: 18px 0 8px; }\r\n  .group { margin-bottom: 14px; }\r\n  .ghead { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; padding: 5px 10px; border-radius: 6px; background: var(--rust); color: #fff; margin-bottom: 8px; }\r\n  .ghead .who { font-weight: 700; }\r\n  .ghead .meta { color: var(--peach); }\r\n  .dot { color: var(--peach); }\r\n  .dot.live { color: var(--live); }\r\n  .tag { font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 4px; background: rgba(255,255,255,.2); color: #fff; }\r\n  .item { border: 1px solid var(--line); border-left: 5px solid var(--orange); border-radius: var(--radius); padding: 9px 11px; margin: 0 0 8px; background: var(--bg); }\r\n  .item.blocking { border-left-color: var(--red); }\r\n  .item.waiting { border-left-color: var(--amber); }\r\n  .item.closed { border-left-color: var(--line); opacity: .7; }\r\n  .title { font-weight: 600; overflow-wrap: anywhere; }\r\n  .item.closed .title { text-decoration: line-through; font-weight: 400; }\r\n  .chip { display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: .02em; padding: 1px 6px; border-radius: 4px; color: #fff; background: var(--orange); margin-right: 6px; vertical-align: 1px; }\r\n  .chip.blocking { background: var(--red); }\r\n  .chip.waiting { background: var(--amber); }\r\n  .chip.closed { background: #6b6b6b; }\r\n  .flag { color: var(--red); font-weight: 700; margin-right: 4px; }\r\n  .num, .age, .detail, .fb, .status, .hint { color: var(--fg-2); }\r\n  .detail { margin-top: 3px; white-space: pre-wrap; overflow-wrap: anywhere; }\r\n  .link { display: inline-block; margin-top: 3px; color: var(--orange); overflow-wrap: anywhere; cursor: pointer; text-decoration: underline; background: none; border: 0; padding: 0; min-height: 0; font-size: 13px; }\r\n  .fb { margin-top: 3px; font-size: 13px; }\r\n  .actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }\r\n  .reply { margin-top: 8px; display: flex; gap: 6px; align-items: flex-end; }\r\n  textarea { flex: 1; min-height: 56px; resize: vertical; font: inherit; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); }\r\n  .confirm { margin-top: 8px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }\r\n  .toast { position: sticky; bottom: 8px; margin-top: 10px; padding: 7px 11px; border-radius: 6px; background: var(--fg); color: var(--bg); font-size: 13px; }\r\n  .empty { color: var(--fg-2); padding: 14px 2px; }\r\n  .err { color: var(--red); }\r\n  @media (max-width: 480px) { main { padding: 8px 12px; } .reply { flex-direction: column; align-items: stretch; } }\r\n</style>\r\n</head>\r\n<body>\r\n<main id=\"root\"><p class=\"empty\">Loading the inbox\u2026</p></main>\r\n<script>\r\n(() => {\r\n  'use strict'\r\n  // Runs two ways: as an MCP App inside the chat (talking to the host over\r\n  // postMessage), or as a page in the browser (talking to the local inbox server).\r\n  const isApp = window.parent !== window\r\n  const api = window.__INBOX_API__\r\n  const root = document.getElementById('root')\r\n  if (isApp) document.body.classList.add('app')\r\n\r\n  const KIND = { decision: 'DECIDE', action: 'DO', signoff: 'SIGN OFF', review: 'REVIEW', merge: 'MERGE', waiting: 'WAITING' }\r\n  let payload = null\r\n  let session = undefined\r\n  let replyTo = null\r\n  let confirmIssue = null\r\n  let busy = false\r\n  let note = ''\r\n  let canOpenLinks = false\r\n  let noteTimer = 0\r\n  const say = text => {\r\n    note = text\r\n    clearTimeout(noteTimer)\r\n    noteTimer = setTimeout(() => { note = ''; render() }, 4000)\r\n  }\r\n\r\n  // ---------- talking to the host (MCP App) ----------\r\n  let nextId = 1\r\n  const pending = new Map()\r\n  const rpc = (method, params) => new Promise((resolve, reject) => {\r\n    const id = nextId++\r\n    pending.set(id, { resolve, reject })\r\n    window.parent.postMessage({ jsonrpc: '2.0', id, method, params }, '*')\r\n  })\r\n  const notify = (method, params) => window.parent.postMessage({ jsonrpc: '2.0', method, params }, '*')\r\n\r\n  const applyHost = ctx => {\r\n    if (!ctx) return\r\n    if (ctx.theme) document.documentElement.style.colorScheme = ctx.theme\r\n    const vars = ctx.styles && ctx.styles.variables\r\n    if (vars) for (const [k, v] of Object.entries(vars)) if (v) document.documentElement.style.setProperty(k, v)\r\n  }\r\n\r\n  if (isApp) {\r\n    window.addEventListener('message', e => {\r\n      if (e.source !== window.parent) return\r\n      const m = e.data\r\n      if (!m || m.jsonrpc !== '2.0') return\r\n      if (m.method === undefined && pending.has(m.id)) {\r\n        const p = pending.get(m.id)\r\n        pending.delete(m.id)\r\n        m.error ? p.reject(new Error(m.error.message || 'Host error')) : p.resolve(m.result)\r\n        return\r\n      }\r\n      if (m.method === 'ui/notifications/tool-input') session = (m.params && m.params.arguments && m.params.arguments.session) || session\r\n      if (m.method === 'ui/notifications/tool-result') take(m.params && m.params.structuredContent)\r\n      if (m.method === 'ui/notifications/host-context-changed') applyHost(m.params)\r\n      if (m.method === 'ui/resource-teardown' && m.id !== undefined) window.parent.postMessage({ jsonrpc: '2.0', id: m.id, result: {} }, '*')\r\n    })\r\n  }\r\n\r\n  // ---------- one way to ask the server, in either mode ----------\r\n  const call = async (args) => {\r\n    const view = payload ? payload.view : { scope: 'project', showClosed: false }\r\n    const body = { scope: view.scope, showClosed: view.showClosed, ...args, session }\r\n    if (isApp) {\r\n      const result = await rpc('tools/call', { name: 'inbox_app_action', arguments: body })\r\n      if (result && result.isError) throw new Error(textOf(result) || 'The inbox could not do that.')\r\n      return result && result.structuredContent\r\n    }\r\n    const res = await fetch(`${api}/act`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })\r\n    if (!res.ok) throw new Error(await res.text())\r\n    return res.json()\r\n  }\r\n  const textOf = r => ((r && r.content) || []).map(c => c.text || '').join(' ')\r\n\r\n  const act = async (args) => {\r\n    if (busy) return\r\n    busy = true\r\n    render()\r\n    try {\r\n      take(await call(args))\r\n    } catch (err) {\r\n      say(String(err.message || err))\r\n    } finally {\r\n      busy = false\r\n      render()\r\n    }\r\n  }\r\n\r\n  const take = next => {\r\n    if (!next || !next.snapshot) return\r\n    payload = next\r\n    if (next.message) say(next.message)\r\n    render()\r\n  }\r\n\r\n  // the host sizes the frame to fit; report after every draw, not only on resize,\r\n  // because a hidden or off-screen frame gets no resize callbacks\r\n  let lastSize = ''\r\n  const reportSize = () => {\r\n    if (!isApp) return\r\n    const size = { width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight }\r\n    const key = `${size.width}x${size.height}`\r\n    if (key === lastSize) return\r\n    lastSize = key\r\n    notify('ui/notifications/size-changed', size)\r\n  }\r\n\r\n  // ---------- drawing ----------\r\n  const h = (tag, attrs, ...kids) => {\r\n    const el = document.createElement(tag)\r\n    for (const [k, v] of Object.entries(attrs || {})) {\r\n      if (v === undefined || v === null || v === false) continue\r\n      if (k.startsWith('on')) el.addEventListener(k.slice(2), v)\r\n      else if (k === 'class') el.className = v\r\n      else el.setAttribute(k, v === true ? '' : v)\r\n    }\r\n    for (const kid of kids.flat(Infinity)) if (kid !== null && kid !== undefined && kid !== false) el.append(kid.nodeType ? kid : String(kid))\r\n    return el\r\n  }\r\n  const btn = (label, onclick, cls) => h('button', { type: 'button', class: cls, onclick, disabled: busy || undefined }, label)\r\n\r\n  const age = (now, at) => {\r\n    const s = Math.max(0, Math.round((now - at) / 1000))\r\n    if (s < 60) return 'now'\r\n    if (s < 3600) return `${Math.floor(s / 60)}m`\r\n    if (s < 86400) return `${Math.floor(s / 3600)}h`\r\n    return `${Math.floor(s / 86400)}d`\r\n  }\r\n\r\n  const openLink = url => {\r\n    if (!/^https:\\/\\//.test(url)) return\r\n    if (isApp) rpc('ui/open-link', { url }).catch(() => { say('The host would not open that link.'); render() })\r\n    else window.open(url, '_blank', 'noopener')\r\n  }\r\n\r\n  const renderItem = (item, project, presence, num) => {\r\n    const isOpen = item.status === 'open'\r\n    const kindCls = !isOpen ? 'closed' : item.blocking ? 'blocking' : item.kind === 'waiting' ? 'waiting' : ''\r\n    const canReply = isOpen && item.kind !== 'waiting'\r\n    const repo = item.pr ? item.pr.repo : /^[\\w.-]+\\/[\\w.-]+$/.test(project.name) ? project.name : null\r\n    const canIssue = isOpen && item.kind !== 'waiting' && !item.issueUrl && repo\r\n    const base = { id: item.id, projectKey: project.key }\r\n    const delivered = fb => fb.isDelivered ? 'delivered' : presence === 'live' ? 'delivered at its next step' : 'delivered when that session resumes'\r\n\r\n    return h('article', { class: `item ${kindCls}` },\r\n      h('div', { class: 'title' },\r\n        h('span', { class: `chip ${kindCls}` }, KIND[item.kind] || item.kind.toUpperCase()),\r\n        item.blocking && isOpen ? h('span', { class: 'flag' }, 'BLOCKING') : null,\r\n        num ? h('span', { class: 'num' }, `#${num} `) : null,\r\n        item.title,\r\n        h('span', { class: 'age' }, ` \xB7 ${age(payload.snapshot.updatedAt, item.createdAt)}`)),\r\n      item.detail ? h('div', { class: 'detail' }, item.detail) : null,\r\n      item.link ? h('button', { type: 'button', class: 'link', onclick: () => openLink(item.link) }, item.link) : null,\r\n      item.issueUrl ? h('button', { type: 'button', class: 'link', onclick: () => openLink(item.issueUrl) }, `Issue: ${item.issueUrl}`) : null,\r\n      item.feedback.map(fb => h('div', { class: 'fb' }, `\u21B3 you ${fb.isChoice ? 'chose' : 'replied'}: ${fb.text} (${delivered(fb)})`)),\r\n      !isOpen ? h('div', { class: 'status' }, `${item.status} by ${item.closedBy || 'someone'}${item.note ? `: ${item.note}` : ''}`) : null,\r\n      item.kind === 'waiting' && isOpen ? h('div', { class: 'hint' }, 'Answer it in that session.') : null,\r\n      h('div', { class: 'actions' },\r\n        isOpen && item.kind === 'decision' ? (item.options || []).map(o => btn(o, () => act({ ...base, action: 'pick', text: o }), 'primary')) : null,\r\n        canReply ? btn(replyTo === item.id ? 'Cancel reply' : 'Reply', () => { replyTo = replyTo === item.id ? null : item.id; render() }) : null,\r\n        isOpen ? btn('Done', () => act({ ...base, action: 'done' })) : null,\r\n        isOpen ? btn('Dismiss', () => act({ ...base, action: 'dismiss' }), 'quiet') : null,\r\n        !isOpen ? btn('Reopen', () => act({ ...base, action: 'reopen' }), 'quiet') : null,\r\n        canIssue && confirmIssue !== item.id ? btn('Promote to issue', () => { confirmIssue = item.id; render() }, 'quiet') : null),\r\n      canIssue && confirmIssue === item.id ? h('div', { class: 'confirm' },\r\n        h('span', {}, `Create a GitHub issue in ${repo}?`),\r\n        btn('Create issue', () => { confirmIssue = null; act({ ...base, action: 'issue' }) }, 'primary'),\r\n        btn('Cancel', () => { confirmIssue = null; render() }, 'quiet')) : null,\r\n      replyTo === item.id ? replyBox(base) : null)\r\n  }\r\n\r\n  const replyBox = base => {\r\n    const area = h('textarea', { placeholder: 'Your reply goes to the session that raised this', 'aria-label': 'Reply' })\r\n    const send = () => {\r\n      const text = area.value.trim()\r\n      if (!text) return\r\n      replyTo = null\r\n      act({ ...base, action: 'reply', text })\r\n    }\r\n    area.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) send() })\r\n    setTimeout(() => area.focus(), 0)\r\n    return h('div', { class: 'reply' }, area, btn('Send', send, 'primary'))\r\n  }\r\n\r\n  const render = () => {\r\n    if (!payload) return\r\n    const { snapshot, view, webUrl } = payload\r\n    const self = snapshot.projects.find(p => p.isSelf)\r\n    const numbers = new Map()\r\n    let n = 0\r\n    for (const g of (self && self.groups) || []) for (const i of g.items) if (i.status === 'open') numbers.set(i.id, ++n)\r\n    const projects = snapshot.projects.filter(p => view.scope === 'all' || p.isSelf)\r\n    const isEmpty = projects.every(p => p.groups.length === 0)\r\n    const blocking = snapshot.blockingCount > 0\r\n\r\n    root.replaceChildren(...[\r\n      h('div', { class: `bar${blocking ? ' blocking' : ''}`, role: 'status' },\r\n        h('span', { class: 'count' }, `Action Inbox \xB7 ${snapshot.openCount} open${blocking ? ` \xB7 ${snapshot.blockingCount} blocking` : ''}${view.scope === 'all' ? ' \xB7 all projects' : ` \xB7 ${view.projectName}`}`),\r\n        isApp && webUrl && canOpenLinks ? btn('Open in browser', () => rpc('ui/open-link', { url: webUrl }).catch(() => {}), 'on-bar') : null),\r\n      h('div', { class: 'tools' },\r\n        btn(view.scope === 'all' ? 'This project' : 'All projects', () => act({ action: 'refresh', scope: view.scope === 'all' ? 'project' : 'all' })),\r\n        btn(view.showClosed ? 'Hide closed' : 'Show closed', () => act({ action: 'refresh', showClosed: !view.showClosed })),\r\n        btn('Refresh', () => act({ action: 'refresh' }), 'quiet')),\r\n      isEmpty ? h('p', { class: 'empty' }, 'Nothing waiting on you. Items appear here when a session needs a decision, a manual step or a merge.') : null,\r\n      projects.map(project => h('section', {},\r\n        view.scope === 'all' ? h('h2', {}, project.name) : null,\r\n        project.groups.map(g => h('div', { class: 'group' },\r\n          h('div', { class: 'ghead' },\r\n            h('span', { class: `dot${g.presence === 'live' ? ' live' : ''}`, 'aria-hidden': 'true' }, g.presence === 'live' ? '\u25CF' : '\u25CB'),\r\n            h('span', { class: 'who' }, g.branch || g.sessionId.slice(0, 8)),\r\n            g.client === 'copilot' ? h('span', { class: 'tag' }, 'Copilot') : g.client === 'claude' ? h('span', { class: 'tag' }, 'Claude') : null,\r\n            g.isSelf ? h('span', { class: 'tag' }, 'this session') : null,\r\n            h('span', { class: 'meta' }, `\xB7 ${g.presence} \xB7 ${g.items.filter(i => i.status === 'open').length} open${g.label ? ` \xB7 \u201C${g.label}\u201D` : ''}`)),\r\n          g.items.map(i => renderItem(i, project, g.presence, project.isSelf ? numbers.get(i.id) : undefined)))))),\r\n      note ? h('div', { class: 'toast', role: 'status' }, note) : null,\r\n    ].flat(Infinity).filter(Boolean))\r\n    reportSize()\r\n  }\r\n\r\n  // ---------- start ----------\r\n  const load = () => call({ action: 'refresh' }).then(take).catch(err => { if (!payload) root.replaceChildren(h('p', { class: 'err' }, `Could not load the inbox: ${err.message || err}`)) })\r\n  // background tabs skip the polling, never the first load\r\n  // and never while the user is typing a reply or confirming, which a redraw would wipe\r\n  const refresh = () => {\r\n    if (busy || replyTo !== null || confirmIssue !== null) return\r\n    if (document.visibilityState === 'visible' || !payload) load()\r\n  }\r\n\r\n  if (isApp) {\r\n    rpc('ui/initialize', { protocolVersion: '2026-01-26', appCapabilities: { availableDisplayModes: ['inline'] }, clientInfo: { name: 'action-inbox', version: '0.4.0' } })\r\n      .then(result => {\r\n        applyHost(result && result.hostContext)\r\n        canOpenLinks = Boolean(result && result.hostCapabilities && result.hostCapabilities.openLinks)\r\n        notify('ui/notifications/initialized', {})\r\n        new ResizeObserver(reportSize).observe(document.body)\r\n        reportSize()\r\n      })\r\n      .catch(() => { root.replaceChildren(h('p', { class: 'err' }, 'This host could not start the inbox view.')) })\r\n  } else {\r\n    refresh()\r\n  }\r\n  // other sessions add and answer items all the time\r\n  setInterval(refresh, isApp ? 10000 : 4000)\r\n})()\r\n</script>\r\n</body>\r\n</html>\r\n";
+
+// copilot/src/web.ts
+import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { createServer } from "node:http";
+var started;
+var readBody = (req) => new Promise((resolve, reject) => {
+  let size = 0;
+  const chunks = [];
+  req.on("data", (chunk) => {
+    size += chunk.length;
+    if (size > 64 * 1024) {
+      reject(new Error("too large"));
+      req.destroy();
+      return;
+    }
+    chunks.push(chunk);
+  });
+  req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+  req.on("error", reject);
+});
+var startWeb = (html, act) => {
+  if (started) return started;
+  started = new Promise((resolve, reject) => {
+    const token = randomBytes(18).toString("base64url");
+    let origin = "";
+    const page = html.replace("<script>", `<script>window.__INBOX_API__ = ${JSON.stringify(`/${token}/api`)}</script>
+<script>`);
+    const server = createServer((req, res) => {
+      const deny = (code, text) => {
+        res.writeHead(code, { "Content-Type": "text/plain; charset=utf-8" });
+        res.end(text);
+      };
+      if (`http://${req.headers.host ?? ""}` !== origin) return deny(403, "Forbidden");
+      const url = req.url ?? "/";
+      if (req.method === "GET" && url === `/${token}/`) {
+        res.writeHead(200, {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "no-store",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff",
+          "Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+        });
+        res.end(page);
+        return;
+      }
+      if (req.method === "POST" && url === `/${token}/api/act`) {
+        const from = req.headers.origin;
+        if (from !== void 0 && from !== origin) return deny(403, "Forbidden");
+        if (!String(req.headers["content-type"] ?? "").startsWith("application/json")) return deny(415, "Expected JSON");
+        readBody(req).then(async (text) => {
+          const out = await act(JSON.parse(text));
+          res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+          res.end(JSON.stringify(out));
+        }).catch((err) => deny(400, String(err.message ?? err)));
+        return;
+      }
+      deny(404, "Not found");
+    });
+    server.on("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      origin = `http://127.0.0.1:${port}`;
+      server.unref();
+      resolve(`${origin}/${token}/`);
+    });
+  });
+  return started;
+};
+var openBrowser = (url) => {
+  if (process.env.ACTION_INBOX_NO_BROWSER) return;
+  const [cmd, args] = process.platform === "win32" ? ["rundll32", ["url.dll,FileProtocolHandler", url]] : process.platform === "darwin" ? ["open", [url]] : ["xdg-open", [url]];
+  try {
+    spawn(cmd, args, { detached: true, stdio: "ignore" }).on("error", () => void 0).unref();
+  } catch {
+  }
+};
+
 // copilot/src/server.ts
-var VERSION = "0.3.0";
+var VERSION = "0.4.0";
+var UI_URI = "ui://action-inbox/inbox.html";
+var UI_MIME = "text/html;profile=mcp-app";
 var PROTOCOLS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 var PR_POLL_MS = 5 * 60 * 1e3;
 var UNKNOWN_SESSION = `copilot-${process.pid.toString(36)}`;
@@ -356,6 +500,9 @@ var send = (msg) => process.stdout.write(`${JSON.stringify(msg)}
 `);
 var rootCwd;
 var canListRoots = false;
+var canShowApps = false;
+var lastSession = {};
+var hasOpenedBrowser = false;
 var located = /* @__PURE__ */ new Map();
 var whereOf = (cwd) => {
   const dir = cwd ?? rootCwd ?? process.cwd();
@@ -444,13 +591,86 @@ var TOOLS = [
       },
       required: ["args"]
     }
+  },
+  {
+    name: "inbox_view",
+    description: "Show the user's Action Inbox as an interactive view: colour-coded items with buttons to choose a decision's option, reply, mark done, dismiss, reopen or promote to a GitHub issue. Call it whenever the user asks to see, open or work through their inbox.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        scope: { type: "string", enum: ["project", "all"], description: "This project (default) or every project" },
+        open_in_browser: { type: "boolean", description: "Also open the view in the browser; use it when the user asks or cannot see the view in the chat" },
+        session: SESSION_PROP
+      }
+    },
+    _meta: { ui: { resourceUri: UI_URI } }
   }
 ];
-var callTool = (name, input) => {
+var APP_TOOL = {
+  name: "inbox_app_action",
+  description: "Used by the Action Inbox view's buttons on the user's behalf. Never call it yourself.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      action: { type: "string", enum: ["refresh", "pick", "reply", "done", "dismiss", "reopen", "issue"] },
+      id: { type: "string" },
+      text: { type: "string" },
+      projectKey: { type: "string" },
+      scope: { type: "string", enum: ["project", "all"] },
+      showClosed: { type: "boolean" },
+      session: SESSION_PROP
+    },
+    required: ["action"]
+  },
+  _meta: { ui: { resourceUri: UI_URI, visibility: ["app"] } }
+};
+var viewPayload = async (where, viewer, opts, message) => {
+  const snapshot = inboxView(where, viewer, opts);
+  const webUrl = await startWeb(inbox_default, webAct).catch(() => void 0);
+  const self = snapshot.projects.find((p) => p.isSelf);
+  const lines2 = [phoneList(self).replace(/\/inbox /g, "inbox ")];
+  if (webUrl) lines2.push("", `Clickable inbox in your browser (works while this session runs): ${webUrl}`);
+  return {
+    text: lines2.join("\n"),
+    structured: { snapshot, view: { ...opts, projectKey: where.key, projectName: where.name }, webUrl, message }
+  };
+};
+var optsOf = (input) => ({ scope: input.scope === "all" ? "all" : "project", showClosed: input.showClosed === true });
+var uiAct = async (input, viewer, where) => {
+  const action = String(input.action ?? "refresh");
+  let message;
+  if (action !== "refresh") {
+    message = applyAction(viewer, {
+      action,
+      id: String(input.id ?? ""),
+      text: typeof input.text === "string" ? input.text : void 0,
+      projectKey: String(input.projectKey ?? where.key)
+    });
+  }
+  return viewPayload(where, viewer, optsOf(input), message);
+};
+var webAct = async (body) => {
+  const where = whereOf(lastSession.cwd);
+  return (await uiAct(body, lastSession.id ?? UNKNOWN_SESSION, where)).structured;
+};
+var callTool = async (name, input) => {
   const session = input.session ?? {};
   const sessionId = typeof session.id === "string" && session.id ? session.id : UNKNOWN_SESSION;
+  if (sessionId !== UNKNOWN_SESSION) lastSession = { id: sessionId, cwd: typeof session.cwd === "string" ? session.cwd : void 0 };
   const where = whereOf(typeof session.cwd === "string" && session.cwd ? session.cwd : void 0);
   const project = loadProject(where);
+  if (name === "inbox_view") {
+    const out = await viewPayload(where, sessionId, optsOf(input));
+    const webUrl = out.structured?.webUrl;
+    const shouldOpen = input.open_in_browser === true || !canShowApps && !hasOpenedBrowser;
+    if (shouldOpen && typeof webUrl === "string") {
+      hasOpenedBrowser = true;
+      openBrowser(webUrl);
+      out.text += "\nOpened it in the browser.";
+    }
+    return out;
+  }
+  if (name === "inbox_app_action") return uiAct(input, sessionId, where);
   if (name === "inbox_add") {
     const fields = itemFromInput(input);
     if (typeof fields === "string") return { text: fields, isError: true };
@@ -488,8 +708,8 @@ var callTool = (name, input) => {
 var PROMPTS = [
   {
     name: "inbox",
-    description: "Action Inbox: list, reply, pick, done, dismiss, issue or add",
-    arguments: [{ name: "command", description: 'e.g. "list" or "reply 3 go ahead" (empty lists)', required: false }]
+    description: "Action Inbox: show it, or list, reply, pick, done, dismiss, issue or add",
+    arguments: [{ name: "command", description: 'e.g. "reply 3 go ahead" (empty shows the inbox)', required: false }]
   }
 ];
 var handle = async (msg) => {
@@ -505,11 +725,18 @@ var handle = async (msg) => {
   const params = msg.params ?? {};
   switch (method) {
     case "initialize": {
-      canListRoots = Boolean(params.capabilities?.roots);
+      const caps = params.capabilities ?? {};
+      canListRoots = Boolean(caps.roots);
+      const ui = (caps.extensions ?? {})["io.modelcontextprotocol/ui"];
+      canShowApps = Boolean(ui?.mimeTypes?.includes(UI_MIME));
+      if (process.env.ACTION_INBOX_DEBUG) {
+        appendFileSync(process.env.ACTION_INBOX_DEBUG, `${JSON.stringify({ at: (/* @__PURE__ */ new Date()).toISOString(), event: "mcp.initialize", clientInfo: params.clientInfo, capabilities: caps })}
+`);
+      }
       const asked = String(params.protocolVersion ?? "");
       return {
         protocolVersion: PROTOCOLS.includes(asked) ? asked : PROTOCOLS[1],
-        capabilities: { tools: {}, prompts: {} },
+        capabilities: { tools: {}, prompts: {}, resources: {}, extensions: { "io.modelcontextprotocol/ui": {} } },
         serverInfo: { name: "action-inbox", version: VERSION },
         instructions: GUIDE
       };
@@ -521,25 +748,27 @@ var handle = async (msg) => {
     case "ping":
       return {};
     case "tools/list":
-      return { tools: TOOLS };
+      return { tools: canShowApps ? [...TOOLS, APP_TOOL] : TOOLS };
     case "tools/call": {
       try {
-        const { text, isError } = callTool(String(params.name), params.arguments ?? {});
-        return { content: [{ type: "text", text }], isError: Boolean(isError) };
+        const { text, isError, structured } = await callTool(String(params.name), params.arguments ?? {});
+        return { content: [{ type: "text", text }], ...structured ? { structuredContent: structured } : {}, isError: Boolean(isError) };
       } catch (err) {
         return { content: [{ type: "text", text: `Action Inbox failed: ${clip(String(err), 300)}` }], isError: true };
       }
     }
+    case "resources/list":
+      return { resources: [{ uri: UI_URI, name: "Action Inbox", description: "The interactive inbox view", mimeType: UI_MIME }] };
+    case "resources/read": {
+      if (params.uri !== UI_URI) throw Object.assign(new Error(`Unknown resource ${String(params.uri)}`), { code: -32002 });
+      return { contents: [{ uri: UI_URI, mimeType: UI_MIME, text: inbox_default, _meta: { ui: { prefersBorder: false } } }] };
+    }
     case "prompts/list":
       return { prompts: PROMPTS };
     case "prompts/get": {
-      const command = String(params.arguments?.command ?? "").trim() || "list";
-      return {
-        description: "Action Inbox command",
-        messages: [
-          { role: "user", content: { type: "text", text: `Run my Action Inbox command with inbox_command, args "${command}", and show me the result.` } }
-        ]
-      };
+      const command = String(params.arguments?.command ?? "").trim();
+      const text = command ? `Run my Action Inbox command with inbox_command, args "${command}", and show me the result.` : "Show my Action Inbox with inbox_view.";
+      return { description: "Action Inbox", messages: [{ role: "user", content: { type: "text", text } }] };
     }
     default:
       if (method.startsWith("notifications/")) return void 0;

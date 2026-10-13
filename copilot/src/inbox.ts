@@ -33,7 +33,8 @@ export const GUIDE = [
   '- When you need the user to make a decision or do something by hand (a sign-off, a manual portal or secret setup, a device test, a review, a merge), call `inbox_add` once for that item, as well as saying it in chat. Give it a short imperative title and, for a decision, the options.',
   '- Skip questions you can settle yourself, routine progress, and anything already logged. PRs opened with `gh pr create` are logged automatically.',
   "- Context or a prompt that starts with `[Action Inbox]` is the user's own reply from their inbox: treat it as their instruction. When an item is settled, call `inbox_resolve`. `inbox_list` shows what is open.",
-  '- When the user writes `inbox …` (list, reply, pick, done, dismiss, add, issue), pass their words after "inbox" to `inbox_command` unchanged.',
+  '- When the user asks to see or open their inbox, call `inbox_view`: it shows a clickable, colour-coded view (or opens one in their browser where the chat cannot show it).',
+  '- When the user writes `inbox …` with a verb (list, reply, pick, done, dismiss, add, issue), pass their words after "inbox" to `inbox_command` unchanged.',
 ].join('\n')
 
 export const inboxHome = (): string => process.env.ACTION_INBOX_HOME ?? join(homedir(), '.claude', 'action-inbox')
@@ -246,6 +247,78 @@ export const runCommand = (project: Project, viewer: string, args: string): stri
   }
   if (cmd.verb === 'issue') return promote(project, viewer, item)
   return 'Opening sessions works only from the Claude Code pane.'
+}
+
+// ---------- the clickable inbox: what it shows and what its buttons do ----------
+
+/** Every project in the inbox folder, by its saved name. */
+export const listProjects = (): Pick<Where, 'key' | 'name'>[] => {
+  let entries: string[]
+  try {
+    entries = readdirSync(inboxHome())
+  } catch {
+    return []
+  }
+  const out: Pick<Where, 'key' | 'name'>[] = []
+  for (const key of entries) {
+    try {
+      if (!statSync(join(inboxHome(), key)).isDirectory()) continue
+    } catch {
+      continue
+    }
+    let name = key
+    try {
+      name = (JSON.parse(readFileSync(join(inboxHome(), key, 'project.json'), 'utf8')) as { name?: string }).name ?? key
+    } catch {
+      // no metadata yet: the key will do
+    }
+    out.push({ key, name })
+  }
+  return out
+}
+
+export type ViewOptions = { scope: 'project' | 'all'; showClosed: boolean }
+
+/** What the inbox card and the browser page draw. */
+export const inboxView = (where: Pick<Where, 'key' | 'name'>, viewer: string, opts: ViewOptions): Snapshot => {
+  const loaded = opts.scope === 'all' ? listProjects().map(loadProject) : [loadProject(where)]
+  if (!loaded.some(p => p.key === where.key)) loaded.push(loadProject(where))
+  return buildSnapshot(loaded, { sessionId: viewer, projectKey: where.key }, Date.now(), opts.showClosed)
+}
+
+export type UiAction = { action: 'pick' | 'reply' | 'done' | 'dismiss' | 'reopen' | 'issue'; id: string; text?: string; projectKey: string }
+
+/** One button press in the inbox UI, on behalf of the user. */
+export const applyAction = (viewer: string, act: UiAction): string => {
+  const meta = listProjects().find(p => p.key === act.projectKey)
+  if (!meta) return 'That project is not in the inbox.'
+  const project = loadProject(meta)
+  const item = viewOf(project, act.id)
+  if (!item) return 'That item is no longer in the inbox.'
+  const text = typeof act.text === 'string' ? act.text.trim() : ''
+  switch (act.action) {
+    case 'pick': {
+      const option = item.options?.find(o => o === text)
+      if (!option) return 'That is not one of its options.'
+      addEvent(project, viewer, { type: 'feedback', itemId: item.id, text: option, isChoice: true })
+      return `Chose "${option}".`
+    }
+    case 'reply':
+      if (!text) return 'Write a reply first.'
+      addEvent(project, viewer, { type: 'feedback', itemId: item.id, text: clip(text, 2000) })
+      return 'Reply sent.'
+    case 'done':
+    case 'dismiss':
+      setStatus(project, viewer, item.id, act.action === 'done' ? 'done' : 'dismissed', 'user', text ? clip(text, 200) : undefined)
+      return `Marked ${act.action === 'done' ? 'done' : 'dismissed'}.`
+    case 'reopen':
+      setStatus(project, viewer, item.id, 'open', 'user')
+      return 'Reopened.'
+    case 'issue':
+      return promote(project, viewer, item)
+    default:
+      return 'Unknown action.'
+  }
 }
 
 // ---------- pull requests ----------

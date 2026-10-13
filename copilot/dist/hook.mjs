@@ -97,7 +97,8 @@ var GUIDE = [
   "- When you need the user to make a decision or do something by hand (a sign-off, a manual portal or secret setup, a device test, a review, a merge), call `inbox_add` once for that item, as well as saying it in chat. Give it a short imperative title and, for a decision, the options.",
   "- Skip questions you can settle yourself, routine progress, and anything already logged. PRs opened with `gh pr create` are logged automatically.",
   "- Context or a prompt that starts with `[Action Inbox]` is the user's own reply from their inbox: treat it as their instruction. When an item is settled, call `inbox_resolve`. `inbox_list` shows what is open.",
-  '- When the user writes `inbox \u2026` (list, reply, pick, done, dismiss, add, issue), pass their words after "inbox" to `inbox_command` unchanged.'
+  "- When the user asks to see or open their inbox, call `inbox_view`: it shows a clickable, colour-coded view (or opens one in their browser where the chat cannot show it).",
+  '- When the user writes `inbox \u2026` with a verb (list, reply, pick, done, dismiss, add, issue), pass their words after "inbox" to `inbox_command` unchanged.'
 ].join("\n");
 var inboxHome = () => process.env.ACTION_INBOX_HOME ?? join(homedir(), ".claude", "action-inbox");
 var writeJson = (path, value) => {
@@ -206,7 +207,7 @@ var recallWhere = (sessionId, cwd) => {
 };
 
 // copilot/src/hook.ts
-var INBOX_TOOL = /inbox_(add|resolve|list|command)$/;
+var INBOX_TOOL = /inbox_(add|resolve|list|command|view|app_action)$/;
 var SHELL_TOOL = /^(bash|powershell|shell|run_in_terminal|runInTerminal)$/i;
 var ASK_TOOL = /^(ask_user|AskUserQuestion)$/i;
 var WAITING = "Waiting on your answer: ";
