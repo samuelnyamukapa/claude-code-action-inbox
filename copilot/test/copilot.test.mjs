@@ -313,26 +313,78 @@ describe('Copilot edition', () => {
     assert.equal(rebound, 403)
   })
 
-  test('a session another process holds open is left alone; once released it is woken', async () => {
-    const held = 'copilot-held-1'
-    const stateDir = join(env.COPILOT_HOME, 'session-state', held)
+  // Copilot holds a session by keeping a lock on its inuse.<pid>.hold file. On
+  // Windows a helper holds the file open exclusively, which reads as EBUSY, as
+  // Copilot's lock does; elsewhere a live pid in the name is what counts.
+  const holdSession = async id => {
+    const stateDir = join(env.COPILOT_HOME, 'session-state', id)
     mkdirSync(stateDir, { recursive: true })
-    // this test process stands in for the app holding the session
-    const hold = join(stateDir, `inuse.${process.pid}.hold`)
-    writeFileSync(hold, '')
+    if (process.platform !== 'win32') {
+      const file = join(stateDir, `inuse.${process.pid}.hold`)
+      writeFileSync(file, '')
+      return { file, release: () => rmSync(file) }
+    }
+    const file = join(stateDir, 'inuse.4242.hold')
+    writeFileSync(file, '')
+    const locker = spawn('powershell.exe', ['-NoProfile', '-Command', `$f = [IO.File]::Open('${file}', 'Open', 'ReadWrite', 'None'); Start-Sleep 120`], { stdio: 'ignore' })
+    await until(() => {
+      try {
+        readFileSync(file)
+        return false
+      } catch (err) {
+        return err.code === 'EBUSY'
+      }
+    }, 15000)
+    // killed, the locker leaves its file behind: a stale lock, as a crashed Copilot does
+    return { file, release: () => locker.kill() }
+  }
+
+  const replyTo = async (id, title) => {
     const hookAs = (event, payload) =>
-      execFileSync('node', [join(DIST, 'hook.mjs'), event], { env, input: JSON.stringify({ sessionId: held, cwd: repo, ...payload }) })
+      execFileSync('node', [join(DIST, 'hook.mjs'), event], { env, input: JSON.stringify({ sessionId: id, cwd: repo, ...payload }) })
     hookAs('sessionStart', {})
-    await call('inbox_add', { kind: 'action', title: 'Restart the worker', session: { id: held, cwd: repo } })
+    await call('inbox_add', { kind: 'action', title, session: { id, cwd: repo } })
     hookAs('agentStop', { stopReason: 'end_turn' })
-    const n = cli('list').match(/#(\d+) \[action\] Restart the worker/)[1]
+    const n = cli('list').match(new RegExp(`#(\\d+) \\[action\\] ${title}`))[1]
     cli('reply', n, 'go ahead')
+  }
+
+  test('a session held open is left alone, says why, and is woken once only a stale lock is left', async () => {
+    const held = 'copilot-held-1'
+    const lock = await holdSession(held)
+    await replyTo(held, 'Restart the worker')
     await new Promise(r => setTimeout(r, 1200))
     assert.equal(fakeRuns().filter(r => r.args.includes(held)).length, 0, 'held open: not woken')
-    rmSync(hold)
-    const run = await until(() => fakeRuns().find(r => r.args.includes(held)))
-    assert.ok(run, 'released: woken, though it never ended')
+    // the view and the doctor say why
+    const view = (await call('inbox_view', { session: { id: SESSION, cwd: repo } })).structuredContent
+    assert.equal(view.wakeStatus[held], 'open')
+    assert.equal(view.daemon, true)
+    assert.match(cli('doctor'), new RegExp(`${held}[^\n]*open in another process[^\n]*holding it`))
+    lock.release()
+    const run = await until(() => fakeRuns().find(r => r.args.includes(held)), 15000)
+    assert.ok(run, 'only a stale lock left: woken, though it never ended')
     assert.match(run.stdin, /Their reply: go ahead/)
+  })
+
+  test('"wake": "always" wakes a session even while another process holds it', async () => {
+    const held = 'copilot-held-2'
+    const lock = await holdSession(held)
+    writeFileSync(join(env.ACTION_INBOX_HOME, 'config.json'), JSON.stringify({ wake: 'always' }))
+    try {
+      await replyTo(held, 'Rotate the cache key')
+      const run = await until(() => fakeRuns().find(r => r.args.includes(held)), 15000)
+      assert.ok(run, 'woken while held')
+    } finally {
+      rmSync(join(env.ACTION_INBOX_HOME, 'config.json'))
+      lock.release()
+    }
+  })
+
+  test('inbox doctor reports the background process, the wake setting and recent wakes', () => {
+    const out = cli('doctor')
+    assert.match(out, /Background process: running/)
+    assert.match(out, /Wake setting: on/)
+    assert.match(out, /Recent wakes:\n {2}\S/)
   })
 
   test('Codex sessions are labelled Codex and never woken through copilot', async () => {

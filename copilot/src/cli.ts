@@ -1,5 +1,6 @@
 // The inbox from a terminal, for clients with no pane:
-//   node cli.mjs [--cwd <dir>] [list | reply <n> <text> | pick <n> <option> | done <n> | dismiss <n> | issue <n> | add <text>]
+//   node cli.mjs [--cwd <dir>] [list | reply <n> <text> | pick <n> <option> | done <n> | dismiss <n> | issue <n> | add <text> | doctor]
+import { doctorReport } from './daemon'
 import { heartbeat, loadProject, locate, runCommand, saveProjectMeta } from './inbox'
 
 const VIEWER = 'terminal'
@@ -10,6 +11,11 @@ const at = argv.indexOf('--cwd')
 if (at >= 0) {
   cwd = argv[at + 1] ?? cwd
   argv.splice(at, 2)
+}
+
+if (argv[0] === 'doctor') {
+  process.stdout.write(`${await doctorReport()}\n`)
+  process.exit(0)
 }
 
 const where = locate(cwd)

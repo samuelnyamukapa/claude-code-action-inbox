@@ -110,7 +110,7 @@ var GUIDE = [
   "- Skip questions you can settle yourself, routine progress, and anything already logged. PRs opened with `gh pr create` are logged automatically.",
   "- Context or a prompt that starts with `[Action Inbox]` is the user's own reply from their inbox: treat it as their instruction. When an item is settled, call `inbox_resolve`. `inbox_list` shows what is open.",
   '- When the user asks to see or open their inbox, call `inbox_view`, then always give them its "Open your Action Inbox" link as a markdown link: the app opens it in its browser panel, where they can click to answer, reply or close items.',
-  '- When the user writes `inbox \u2026` with a verb (list, reply, pick, done, dismiss, add, issue), pass their words after "inbox" to `inbox_command` unchanged.'
+  '- When the user writes `inbox \u2026` with a verb (list, reply, pick, done, dismiss, add, issue, doctor), pass their words after "inbox" to `inbox_command` unchanged.'
 ].join("\n");
 var inboxHome = () => process.env.ACTION_INBOX_HOME ?? join(homedir(), ".claude", "action-inbox");
 var writeJson = (path, value) => {

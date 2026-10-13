@@ -28,11 +28,11 @@ import {
   type Where,
 } from './inbox'
 import INBOX_HTML from './ui/inbox.html'
-import { ensureDaemon } from './daemon'
+import { doctorReport, ensureDaemon } from './daemon'
 import { openBrowser } from './web'
-import { readConfig } from './wake'
+import { readConfig, wakeStatusOf } from './wake'
 
-const VERSION = '0.5.0'
+const VERSION = '0.5.1'
 const UI_URI = 'ui://action-inbox/inbox.html'
 const UI_MIME = 'text/html;profile=mcp-app'
 const PROTOCOLS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05']
@@ -141,7 +141,7 @@ const TOOLS = [
   {
     name: 'inbox_command',
     description:
-      'Run the USER\'s own Action Inbox command, e.g. "list", "reply 3 go ahead", "pick 3 2", "done 3", "dismiss 3", "issue 3", "add Call the accountant". Call it ONLY when the user explicitly asks to act on their inbox, passing their words after "inbox" unchanged; never use it to answer items yourself. Show the user the result.',
+      'Run the USER\'s own Action Inbox command, e.g. "list", "reply 3 go ahead", "pick 3 2", "done 3", "dismiss 3", "issue 3", "add Call the accountant", or "doctor" (why replies are or are not waking sessions). Call it ONLY when the user explicitly asks to act on their inbox, passing their words after "inbox" unchanged; never use it to answer items yourself. Show the user the result.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -205,7 +205,16 @@ const viewPayload = async (where: Where, viewer: string, opts: ViewOptions, mess
   lines.push(phoneList(self).replace(/\/inbox /g, 'inbox '))
   return {
     text: lines.join('\n'),
-    structured: { snapshot, view: { ...opts, projectKey: where.key, projectName: where.name }, webUrl, message, wake: readConfig().wake },
+    structured: {
+      snapshot,
+      view: { ...opts, projectKey: where.key, projectName: where.name },
+      webUrl,
+      message,
+      wake: readConfig().wake,
+      wakeStatus: wakeStatusOf(loadProject(where).sessions),
+      // the page is served by the background process, so a link means it runs
+      daemon: Boolean(base),
+    },
   }
 }
 
@@ -279,7 +288,9 @@ const callTool = async (name: string, input: Json): Promise<ToolOut> => {
   }
 
   if (name === 'inbox_command') {
-    return { text: runCommand(project, sessionId, typeof input.args === 'string' ? input.args : '') }
+    const args = typeof input.args === 'string' ? input.args : ''
+    if (/^\s*doctor\s*$/i.test(args)) return { text: await doctorReport() }
+    return { text: runCommand(project, sessionId, args) }
   }
 
   return { text: `Unknown tool ${name}.`, isError: true }

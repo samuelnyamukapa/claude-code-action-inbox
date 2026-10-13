@@ -8,12 +8,11 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { join } from 'node:path'
 
-import type { Snapshot } from '../../types'
 import { applyAction, inboxHome, inboxView, listProjects, loadProject, type UiAction, type ViewOptions } from './inbox'
 import INBOX_HTML from './ui/inbox.html'
-import { readConfig, wakePass } from './wake'
+import { readConfig, wakePass, wakeStatusOf } from './wake'
 
-export const DAEMON_VERSION = '0.5.0'
+export const DAEMON_VERSION = '0.5.1'
 const VIEWER = 'browser'
 const IDLE_EXIT_MS = 6 * 60 * 60 * 1000
 
@@ -131,7 +130,7 @@ const projectFor = (key: unknown) => {
   return best
 }
 
-const act = (body: Record<string, unknown>): { snapshot: Snapshot; view: Record<string, unknown>; webUrl?: string; message?: string; wake: string } | { error: string } => {
+const act = (body: Record<string, unknown>): Record<string, unknown> => {
   const meta = projectFor(body.projectKey)
   if (!meta) return { error: 'The inbox is empty: no session has used it yet.' }
   const opts: ViewOptions = { scope: body.scope === 'all' ? 'all' : 'project', showClosed: body.showClosed === true }
@@ -152,6 +151,9 @@ const act = (body: Record<string, unknown>): { snapshot: Snapshot; view: Record<
     view: { ...opts, projectKey: meta.key, projectName: meta.name },
     message,
     wake: readConfig().wake,
+    // why each Copilot session can or cannot be woken, for the reply labels
+    wakeStatus: wakeStatusOf((opts.scope === 'all' ? listProjects() : [meta]).flatMap(m => loadProject(m).sessions)),
+    daemon: true,
   }
 }
 
@@ -286,3 +288,71 @@ const main = () => {
 }
 
 if (process.argv[1] && /daemon\.m?[jt]s$/.test(process.argv[1])) main()
+
+// ---------- inbox doctor: why replies are or are not reaching sessions ----------
+
+const ago = (at: number) => {
+  const s = Math.round((Date.now() - at) / 1000)
+  return s < 90 ? `${s}s ago` : s < 5400 ? `${Math.round(s / 60)}m ago` : `${Math.round(s / 3600)}h ago`
+}
+
+const WHY: Record<string, string> = {
+  ready: 'can be woken now',
+  open: 'open in another process (the Copilot app or a terminal): not woken unless "wake" is "always"',
+  'mid-turn': 'mid-turn: it gets the reply at its next step',
+  'unknown-open': 'no Copilot session folder found and it has not ended: not woken',
+  off: 'waking is off in config.json',
+  'not-copilot': 'not a Copilot session',
+}
+
+/** A plain report of everything that decides whether a reply wakes its session. */
+export const doctorReport = async (): Promise<string> => {
+  const { spawnSync } = await import('node:child_process')
+  const { existsSync } = await import('node:fs')
+  const { copilotHome, holdsOf, readConfig: config, wakeBlock } = await import('./wake')
+  const { pendingFor } = await import('../../hooks/model')
+  const lines = ['Action Inbox doctor', `Inbox folder: ${inboxHome()}`]
+
+  const state = readState()
+  if (!state) lines.push('Background process: not started yet (it starts with the first Copilot session that loads the plugin)')
+  else if (await isHealthy(state)) lines.push(`Background process: running (pid ${state.pid}, version ${state.version}, page on port ${state.port})`)
+  else lines.push(`Background process: NOT running (last seen as pid ${state.pid}, version ${state.version}); start a new Copilot session to restart it`)
+
+  const custom = process.env.ACTION_INBOX_COPILOT_CMD
+  if (custom) lines.push(`Copilot command: ${custom} (test override)`)
+  else {
+    const isWin = process.platform === 'win32'
+    const found = spawnSync(isWin ? 'where' : 'which', ['copilot'], { encoding: 'utf8', timeout: 10000 })
+    const path = found.status === 0 ? found.stdout.trim().split(/\r?\n/)[0] : ''
+    const version = path ? spawnSync('copilot', ['--version'], { encoding: 'utf8', timeout: 20000, shell: isWin }).stdout.trim().split(/\r?\n/)[0] : ''
+    lines.push(path ? `Copilot command: ${path} (${version || 'version unknown'})` : 'Copilot command: NOT on PATH, so no session can be woken (install Copilot CLI: npm install -g @github/copilot)')
+  }
+
+  const cfg = config()
+  lines.push(`Wake setting: ${cfg.wake}${cfg.wakeArgs.length ? `, extra flags ${cfg.wakeArgs.join(' ')}` : ''} (${join(inboxHome(), 'config.json')})`)
+  const sessionsDir = join(copilotHome(), 'session-state')
+  lines.push(`Copilot sessions folder: ${sessionsDir}${existsSync(sessionsDir) ? '' : ' (NOT found)'}`)
+
+  const now = Date.now()
+  const waiting: string[] = []
+  const wakes: { at: number; text: string }[] = []
+  for (const meta of listProjects()) {
+    const project = loadProject(meta)
+    for (const session of project.sessions) {
+      if (session.client !== 'copilot') continue
+      const { replies } = pendingFor(session.sessionId, project.items, project.events)
+      if (replies.length === 0) continue
+      const why = wakeBlock(session, cfg, now) ?? 'ready'
+      const holds = holdsOf(session.sessionId)
+      const holdText = holds === undefined ? 'no session folder' : holds.length === 0 ? 'no locks' : holds.map(h => `pid ${h.pid} ${h.isLive ? 'holding it' : 'stale lock'}`).join(', ')
+      waiting.push(`  ${session.sessionId} "${session.label ?? ''}" in ${meta.name}: ${replies.length} repl${replies.length === 1 ? 'y' : 'ies'}; ${WHY[why] ?? why} [${holdText}; ended: ${session.isEnded ? 'yes' : 'no'}; turn: ${session.turn ?? 'unknown'}; seen ${ago(session.lastSeen)}]`)
+    }
+    for (const ev of project.events) {
+      if (ev.type === 'wake') wakes.push({ at: ev.at, text: `  ${ago(ev.at)}: ${ev.ok ? 'woke' : 'FAILED to wake'} a session in ${meta.name}${ev.detail ? ` (${ev.detail})` : ''}` })
+    }
+  }
+  lines.push(waiting.length ? 'Replies waiting for a Copilot session:' : 'Replies waiting for a Copilot session: none', ...waiting)
+  wakes.sort((a, b) => b.at - a.at)
+  lines.push(wakes.length ? 'Recent wakes:' : 'Recent wakes: none', ...wakes.slice(0, 5).map(w => w.text))
+  return lines.join('\n')
+}
